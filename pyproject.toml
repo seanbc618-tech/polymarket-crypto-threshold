@@ -1,0 +1,50 @@
+[project]
+name = "crypto-threshold"
+version = "0.1.0"
+description = "Polymarket crypto price threshold research and dry-run bot"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "typer>=0.12,<1",
+    "pydantic>=2,<3",
+    "pydantic-settings>=2,<3",
+    "httpx>=0.27,<1",
+    "rich>=13,<14",
+    "polymarket-client==0.1.0b16",
+    "binance-sdk-spot==10.0.0",
+    "eth-account>=0.13,<1",
+]
+
+[project.scripts]
+crypto-threshold = "crypto_threshold.cli:app"
+
+[dependency-groups]
+dev = [
+    "pytest>=8,<9",
+    "ruff>=0.8,<1",
+    "mypy>=1.11,<2",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/crypto_threshold"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+src = ["src"]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "UP"]
+
+[tool.mypy]
+python_version = "3.11"
+check_untyped_defs = true
+ignore_missing_imports = true
+warn_unused_ignores = true

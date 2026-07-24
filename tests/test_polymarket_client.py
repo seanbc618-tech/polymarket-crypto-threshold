@@ -1,0 +1,86 @@
+"""Public-only Polymarket HTTP client tests."""
+
+from __future__ import annotations
+
+import httpx
+
+from crypto_threshold.adapters.polymarket.client import GammaClobReadClient
+from crypto_threshold.config import Settings
+from tests.conftest import make_market_payload
+
+
+def test_discovery_queries_both_threshold_directions() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        query = request.url.params["q"]
+        suffix = "above" if "above" in query else "below"
+        market = make_market_payload(id=f"market-{suffix}", conditionId=f"condition-{suffix}")
+        return httpx.Response(
+            200,
+            json={"events": [{"id": "event-1", "markets": [market]}]},
+        )
+
+    transport = httpx.MockTransport(handler)
+    settings = Settings(_env_file=None)
+    client = GammaClobReadClient(settings, client=httpx.Client(transport=transport))
+    markets = client.discover_markets("BTC", 4)
+    assert {market["id"] for market in markets} == {"market-above", "market-below"}
+    assert {request.url.params["q"] for request in requests} == {
+        "Bitcoin above",
+        "Bitcoin below",
+    }
+    assert all(request.url.params["events_status"] == "active" for request in requests)
+    assert all(request.url.params["keep_closed_markets"] == "0" for request in requests)
+    assert all(request.method == "GET" for request in requests)
+
+
+def test_market_book_and_fee_calls_are_get_only() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path.startswith("/markets/"):
+            return httpx.Response(200, json=make_market_payload())
+        if request.url.path == "/book":
+            return httpx.Response(200, json={"bids": [], "asks": []})
+        return httpx.Response(200, json={"fd": {"r": 0.07, "e": 1, "to": True}})
+
+    transport = httpx.MockTransport(handler)
+    settings = Settings(_env_file=None)
+    client = GammaClobReadClient(settings, client=httpx.Client(transport=transport))
+    client.get_market("market-1")
+    client.get_order_book("yes-token")
+    client.get_market_info("condition-1")
+    assert [request.method for request in requests] == ["GET", "GET", "GET"]
+    assert requests[-1].url.path == "/clob-markets/condition-1"
+
+
+def test_event_context_resolves_event_without_mutating_market_payload() -> None:
+    market = make_market_payload()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"events": [{"id": "event-1", "markets": [market]}]},
+        )
+
+    transport = httpx.MockTransport(handler)
+    settings = Settings(_env_file=None)
+    client = GammaClobReadClient(settings, client=httpx.Client(transport=transport))
+    context = client.get_market_event_context("market-1", "condition-1", market["question"])
+    assert context.event_id == "event-1"
+    assert context.raw_payload["events"][0]["id"] == "event-1"
+
+
+def test_clob_server_time_health_read() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"
+        assert request.url.path == "/time"
+        return httpx.Response(200, json=1784700000)
+
+    transport = httpx.MockTransport(handler)
+    settings = Settings(_env_file=None)
+    client = GammaClobReadClient(settings, client=httpx.Client(transport=transport))
+    assert client.get_server_time() == 1784700000

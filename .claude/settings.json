@@ -1,0 +1,43 @@
+{
+  "enabledPlugins": {
+    "superpowers@claude-plugins-official": true
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "case \"$CLAUDE_FILE_PATH\" in *.py) uv run ruff check \"$CLAUDE_FILE_PATH\" ;; esac",
+            "description": "Check edited Python files with Ruff"
+          }
+        ]
+      },
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "case \"$CLAUDE_FILE_PATH\" in src/crypto_threshold/*.py|src/crypto_threshold/**/*.py) test_file=\"tests/test_$(basename \"$CLAUDE_FILE_PATH\" .py).py\"; if [ -f \"$test_file\" ]; then uv run pytest \"$test_file\" -q --tb=no; fi ;; esac",
+            "description": "Run related tests when source files change"
+          }
+        ]
+      }
+    ]
+  },
+  "permissions": {
+    "allow": [
+      "Edit",
+      "Write",
+      "Bash(uv run *)",
+      "Bash(git *)",
+      "Bash(python3 *)"
+    ],
+    "deny": [
+      "Bash(rm -rf *)",
+      "Bash(drop *)",
+      "Bash(DELETE *)"
+    ]
+  }
+}
