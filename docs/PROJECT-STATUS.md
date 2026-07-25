@@ -255,7 +255,12 @@ project review and never authorizes live capital or Phase 3 trading work.
   pairs. The process environment has zero non-empty credentials and zero
   proxies. Initial cycles correctly rejected windows that predated startup and
   then rejected the first common boundary until the configured 15-minute
-  volatility history had warmed up.
+  volatility history had warmed up. At the next common boundary, all seven 15m
+  markets and six 5m markets entered `analyzed`; the XRP 5m market was isolated
+  as `stale_or_missing_chainlink_current_tick`. The following cycle recovered
+  without a restart and persisted seven analyzed markets for each interval.
+  Four hypothetical paper entries were recorded, with no order/fill/position or
+  other trading-mutation table.
 - Final local deployment gate on 2026-07-24: `151 passed`; Ruff reported no
   findings; mypy reported no issues in 51 source files; `git diff --check` was
   clean.
