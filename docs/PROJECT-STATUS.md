@@ -29,7 +29,10 @@ XRP, DOGE, BNB, and HYPE. These are Chainlink USD Data Stream contracts, not
 Binance daily thresholds. They use the same canonical discovery, workflow, and
 repository ownership path, but run with a separate configuration, evidence
 database, replay family, and VPS systemd unit. This expansion is shadow
-research only and does not make Phase 2 accepted.
+research only and does not make Phase 2 accepted. The independent
+`crypto-threshold-updown-shadow.service` has now been deployed on the
+direct-connect VPS against
+`/opt/polymarket-crypto-threshold/data/updown-shadow.db`.
 
 No order signer, authenticated trading client, BUY/SELL method, cancellation
 path, or position mutation exists in the runtime. Setting
@@ -51,10 +54,14 @@ path, or position mutation exists in the runtime. Setting
 - Local network evidence is not VPS readiness evidence. The VPS has rerun
   `doctor`, public REST/WebSocket checks, shadow monitoring, fallback checks,
   and the mechanical acceptance command against VPS-generated evidence.
-- The deployed process has no private key, funder, authenticated channel, or
-  proxy environment. It remains `TRADING_DISABLED=true`, uses
+- The daily process has no private key, funder, authenticated channel, or proxy
+  environment. It remains `TRADING_DISABLED=true`, uses
   `POLYMARKET_STREAM_USER_CHANNEL_ENABLED=false`, and writes only to
   `/opt/polymarket-crypto-threshold/data/phase2-vps.db`.
+- The independent short-Up/Down process has the same no-secret/no-proxy safety
+  boundary, disables Binance streaming, enables only the public Chainlink
+  reference stream, and writes only to
+  `/opt/polymarket-crypto-threshold/data/updown-shadow.db`.
 
 ## Implemented Scope
 
@@ -232,16 +239,23 @@ project review and never authorizes live capital or Phase 3 trading work.
 - An isolated direct-connect VPS candidate preflight on 2026-07-25 initialized
   schema v4, passed `doctor`, returned public CLOB time, and received fresh
   Chainlink ticks for all seven pairs without a proxy or credentials.
-- Its first isolated shadow cycle discovered exactly 14 currently open markets,
-  analyzed 14 through REST, entered zero paper positions, and safely rejected
-  all 14 because the process began after their exact start boundaries. Thirteen
-  had only `missing_chainlink_window_start_tick`; one also had incomplete books.
-  This was expected fail-closed evidence, not a model result.
-- After the candidate crossed the next common boundary, the isolated database
-  contained 14 real `analyzed` signals: seven 5m and seven 15m, one for every
-  supported asset. Seventy earlier signals remained explicit rejections.
-  Paper entered zero positions. This proves the read-only loop is operational,
-  not that its probabilities are calibrated or profitable.
+- The bounded isolated candidate completed 17 cycles over 20 minutes:
+  15 `complete_rest_fallback` and two safely degraded on
+  `reconciliation_hint_pending_rest`. It persisted 238 signals, including 156
+  analyzed signals across both 5m and 15m markets, and 82 explicit rejections.
+  It created 13 hypothetical paper entries, of which five settled from 21
+  public Gamma labels. All label provider/pair/interval/field/operator values
+  matched the contracts, all dynamic signal boundaries matched Gamma's
+  `priceToBeat`, and all `>=` outcomes recomputed without mismatch. The five
+  settled entries' aggregate `+26.867898 USDC` is operational evidence from a
+  tiny correlated sample, not evidence of profitability.
+- The formal independent Up/Down service started on 2026-07-25 at
+  `08:41:02 UTC`. Its fail-closed `doctor` passed schema v4, WAL, foreign keys,
+  Gamma/CLOB reads, live NO-GO, and fresh direct Chainlink ticks for all seven
+  pairs. The process environment has zero non-empty credentials and zero
+  proxies. Initial cycles correctly rejected windows that predated startup and
+  then rejected the first common boundary until the configured 15-minute
+  volatility history had warmed up.
 - Final local deployment gate on 2026-07-24: `151 passed`; Ruff reported no
   findings; mypy reported no issues in 51 source files; `git diff --check` was
   clean.
@@ -296,11 +310,12 @@ project review and never authorizes live capital or Phase 3 trading work.
   no-trading surface, replay verification, cycle/REST/rejection/paper evidence,
   and external schema drift. It remains `PENDING/NOT ACCEPTED` on unique-label
   OOS calibration, formal VPS 72-hour coverage, and Binance reconnect evidence.
-- Deployment runtime commit `5999d51` is installed at
-  `/opt/polymarket-crypto-threshold` under the independent
-  `crypto-threshold` system user. The weather autopilot and backup timer remained
-  active throughout deployment. No Crypto Dashboard or wallet setup was
-  deployed.
+- The public VPS application tree now contains the short-Up/Down feature commit
+  `01b78da` under the independent `crypto-threshold` system user. The original
+  daily service retained PID `49268`, zero restarts, and its original
+  `2026-07-24 13:39:56 CST` start time throughout the in-place source update.
+  The weather autopilot was not modified. No Crypto Dashboard or wallet setup
+  was enabled.
 - Direct VPS `doctor` passed Gamma, CLOB, Binance REST, Coinbase REST, schema v3
   WAL/foreign-key checks, shadow mode, and live NO-GO. An official Binance SDK
   probe received fresh closed BTCUSDT and ETHUSDT `1m Close` ticks with
@@ -325,6 +340,10 @@ project review and never authorizes live capital or Phase 3 trading work.
 - `crypto-threshold-backup.timer` is active. A manual WAL-consistent backup
   completed with `PRAGMA integrity_check=ok`; source and backup contained no
   order/fill/position/signer/reconciliation tables.
+- `crypto-threshold-updown-backup.timer` is independently scheduled for
+  `04:00 CST`. Its deployment smoke exposed transient `.partial-wal` and
+  `.partial-shm` sidecars; the backup helper now normalizes the destination to
+  DELETE journal mode and removes all temporary sidecars before retention.
 - Exact final test, lint, type-check, diff-check, and commit evidence is recorded
   in the delivery report for the Phase 2 commit.
 
@@ -338,6 +357,9 @@ project review and never authorizes live capital or Phase 3 trading work.
   this risk.
 - A process started or reconnected after a 5m/15m boundary cannot reconstruct
   the beginning value from the live stream and rejects that active window.
+- A fresh short-Up/Down process also needs the configured trailing volatility
+  history before it can analyze a boundary; warm-up rejections are persisted
+  and cannot be treated as market/model failures.
 - Gamma's 5m/15m discovery metadata can report misleading recurrence values;
   discovery therefore verifies series slug and exact window duration.
 - Stream Market Channel data is BBO-only acceleration, not L2 executable depth;

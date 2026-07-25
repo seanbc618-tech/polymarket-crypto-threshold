@@ -41,13 +41,14 @@ def test_backup_is_consistent_and_prunes_old_copies(tmp_path: Path) -> None:
             "read-only",
         )
         assert restored.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+        assert restored.execute("PRAGMA journal_mode").fetchone() == ("delete",)
     finally:
         restored.close()
     assert [path.name for path in sorted(output_dir.glob("*.db"))] == [
         old_two.name,
         backup.name,
     ]
-    assert not list(output_dir.glob("*.partial"))
+    assert not list(output_dir.glob("*.partial*"))
 
 
 def test_backup_rejects_missing_database_and_invalid_retention(

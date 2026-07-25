@@ -23,6 +23,10 @@ def backup_database(database: Path, output_dir: Path, retention: int) -> Path:
     timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S.%fZ")
     destination = destination_dir / f"crypto-threshold-{timestamp}.db"
     temporary = destination.with_suffix(".db.partial")
+    temporary_sidecars = (
+        Path(f"{temporary}-wal"),
+        Path(f"{temporary}-shm"),
+    )
 
     try:
         source = sqlite3.connect(f"{source_path.as_uri()}?mode=ro", uri=True)
@@ -31,6 +35,11 @@ def backup_database(database: Path, output_dir: Path, retention: int) -> Path:
             source.execute("PRAGMA query_only = ON")
             source.backup(target)
             target.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            journal_mode = target.execute("PRAGMA journal_mode = DELETE").fetchone()
+            if journal_mode != ("delete",):
+                raise RuntimeError(
+                    f"backup journal mode normalization failed: {journal_mode!r}"
+                )
         finally:
             target.close()
             source.close()
@@ -51,6 +60,8 @@ def backup_database(database: Path, output_dir: Path, retention: int) -> Path:
         return destination
     finally:
         temporary.unlink(missing_ok=True)
+        for sidecar in temporary_sidecars:
+            sidecar.unlink(missing_ok=True)
 
 
 def _prune_backups(output_dir: Path, retention: int) -> None:
