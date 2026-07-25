@@ -23,6 +23,16 @@ def test_yes_no_mapping_follows_outcome_order() -> None:
     assert market.no_token_id == "no-token"
 
 
+def test_up_down_mapping_follows_outcome_order() -> None:
+    payload = make_market_payload(
+        outcomes=json.dumps(["Down", "Up"]),
+        clobTokenIds=json.dumps(["down-token", "up-token"]),
+    )
+    market = translate_market(payload, received_at=NOW)
+    assert market.yes_token_id == "up-token"
+    assert market.no_token_id == "down-token"
+
+
 def test_malformed_clob_token_ids_do_not_guess_mapping() -> None:
     market = translate_market(
         make_market_payload(clobTokenIds="not-json"), received_at=NOW

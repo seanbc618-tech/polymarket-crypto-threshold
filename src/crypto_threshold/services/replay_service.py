@@ -11,10 +11,11 @@ from typing import Any
 from uuid import uuid4
 
 from crypto_threshold.domain.research import ReplayBuildResult, ReplayVerificationResult
+from crypto_threshold.domain.rules import DAILY_THRESHOLD_FAMILY, SHORT_UPDOWN_FAMILY
 from crypto_threshold.storage.repositories import Repository
 
 REPLAY_SOURCE_VERSION = "replay-manifest-v1"
-REQUIRED_INPUT_ROLES = {
+DAILY_REQUIRED_INPUT_ROLES = {
     "market",
     "yes_book",
     "no_book",
@@ -23,6 +24,17 @@ REQUIRED_INPUT_ROLES = {
     "volatility_klines_1d",
     "sanity_spot",
 }
+SHORT_REQUIRED_INPUT_ROLES = {
+    "market",
+    "up_book",
+    "down_book",
+    "market_info_fee_schedule",
+    "chainlink_start_price",
+    "chainlink_current_price",
+    "chainlink_volatility_window",
+}
+# Compatibility export for the original daily-threshold replay tests.
+REQUIRED_INPUT_ROLES = DAILY_REQUIRED_INPUT_ROLES
 
 
 class ReplayService:
@@ -37,20 +49,33 @@ class ReplayService:
         self.repository = repository
         self.clock = clock or (lambda: datetime.now(UTC))
 
-    def build(self, name: str) -> ReplayBuildResult:
+    def build(
+        self,
+        name: str,
+        *,
+        contract_family: str = DAILY_THRESHOLD_FAMILY,
+    ) -> ReplayBuildResult:
         if not name.strip():
             raise ValueError("replay dataset name is required")
+        required_roles = _required_roles(contract_family)
         items: list[dict[str, Any]] = []
         rejected: list[str] = []
-        for signal in self.repository.replay_candidate_rows():
-            item, reason = self._candidate_item(signal, ordinal=len(items))
+        for signal in self.repository.replay_candidate_rows(
+            contract_family=contract_family
+        ):
+            item, reason = self._candidate_item(
+                signal,
+                ordinal=len(items),
+                required_roles=required_roles,
+            )
             if item is None:
                 rejected.append(f"{signal['signal_id']}:{reason}")
                 continue
             items.append(item)
 
         config = {
-            "required_input_roles": sorted(REQUIRED_INPUT_ROLES),
+            "contract_family": contract_family,
+            "required_input_roles": sorted(required_roles),
             "source_version": REPLAY_SOURCE_VERSION,
         }
         manifest_hash = _hash(
@@ -132,13 +157,21 @@ class ReplayService:
             reasons=tuple(reasons),
         )
 
-    def _candidate_item(self, signal: Any, *, ordinal: int) -> tuple[dict[str, Any] | None, str]:
+    def _candidate_item(
+        self,
+        signal: Any,
+        *,
+        ordinal: int,
+        required_roles: set[str],
+    ) -> tuple[dict[str, Any] | None, str]:
         decision_at = _time(signal["observed_at"])
         deadline = _time(signal["deadline"])
         label_available_at = _time(signal["label_received_at"])
         label_target = _time(signal["label_target_time_utc"])
         if deadline != label_target:
             return None, "settlement_target_mismatch"
+        if not _same_decimal(signal["threshold"], signal["label_strike"]):
+            return None, "settlement_threshold_mismatch"
         if decision_at >= deadline:
             return None, "non_predeadline_signal"
         if label_available_at <= decision_at:
@@ -148,7 +181,7 @@ class ReplayService:
             return None, "missing_analysis_run_id"
         inputs = self.repository.signal_input_rows(str(signal["signal_id"]))
         roles = {str(row["input_role"]) for row in inputs}
-        if not REQUIRED_INPUT_ROLES.issubset(roles):
+        if not required_roles.issubset(roles):
             return None, "incomplete_exact_inputs"
         for row in inputs:
             if str(row["analysis_run_id"] or "") != run_id:
@@ -197,10 +230,21 @@ def _feature_payload(row: Any) -> dict[str, Any]:
         "model_name",
         "model_version",
         "observed_at",
+        "contract_family",
+        "affirmative_outcome",
+        "negative_outcome",
     )
     payload = {field: row[field] for field in fields}
     payload["outcome_yes"] = bool(row["outcome_yes"])
     return payload
+
+
+def _required_roles(contract_family: str) -> set[str]:
+    if contract_family == DAILY_THRESHOLD_FAMILY:
+        return DAILY_REQUIRED_INPUT_ROLES
+    if contract_family == SHORT_UPDOWN_FAMILY:
+        return SHORT_REQUIRED_INPUT_ROLES
+    raise ValueError(f"unsupported replay contract family: {contract_family}")
 
 
 def _input_manifest_hash(rows: list[Any]) -> str:
@@ -240,6 +284,13 @@ def _ev_matches(feature: dict[str, Any]) -> bool:
         abs(yes - Decimal(str(feature["yes_net_ev"]))) <= tolerance
         and abs(no - Decimal(str(feature["no_net_ev"]))) <= tolerance
     )
+
+
+def _same_decimal(left: Any, right: Any) -> bool:
+    try:
+        return Decimal(str(left)) == Decimal(str(right))
+    except Exception:
+        return False
 
 
 def _json(value: Any) -> str:

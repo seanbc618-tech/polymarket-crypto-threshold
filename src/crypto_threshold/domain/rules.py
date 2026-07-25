@@ -8,17 +8,23 @@ from datetime import UTC, date, datetime, time
 from decimal import Decimal, InvalidOperation
 from zoneinfo import ZoneInfo
 
+from crypto_threshold.domain.assets import (
+    ASSET_CONTRACTS,
+    SHORT_UPDOWN_ASSETS,
+    SUPPORTED_ASSETS,
+    asset_contract,
+)
 from crypto_threshold.domain.markets import CryptoMarket
 
-PARSER_VERSION = "2.0.0"
+PARSER_VERSION = "3.0.0"
+DAILY_THRESHOLD_FAMILY = "daily_threshold"
+SHORT_UPDOWN_FAMILY = "short_updown"
 SETTLEMENT_TIMEZONE = "America/New_York"
-SUPPORTED_ASSETS = {"BTC", "ETH"}
 
 ASSET_ALIASES = {
-    "bitcoin": "BTC",
-    "btc": "BTC",
-    "ethereum": "ETH",
-    "eth": "ETH",
+    alias: symbol
+    for symbol, contract in ASSET_CONTRACTS.items()
+    for alias in contract.aliases
 }
 
 MONTHS = {
@@ -75,6 +81,12 @@ class CryptoResolutionRule:
     tradable: bool
     preview_only: bool
     rejection_reasons: tuple[str, ...]
+    contract_family: str = DAILY_THRESHOLD_FAMILY
+    boundary_type: str = "fixed_strike"
+    window_start_time_utc: datetime | None = None
+    affirmative_outcome: str = "Yes"
+    negative_outcome: str = "No"
+    series_slug: str | None = None
 
     @property
     def rejection_reason(self) -> str | None:
@@ -112,6 +124,10 @@ def parse_contract(
 ) -> CryptoResolutionRule:
     """Parse and gate a Gamma market using its binding description."""
     now = _as_utc(now or datetime.now(UTC))
+    normalized_outcomes = tuple(outcome.strip().lower() for outcome in market.outcomes)
+    if set(normalized_outcomes) == {"up", "down"}:
+        return _parse_short_updown_contract(market, now=now)
+
     question = market.question.strip()
     description = (market.description or "").strip()
     combined = f"{question}\n{description}"
@@ -155,7 +171,6 @@ def parse_contract(
         reasons.append("unsupported_path_dependent_contract")
     if re.search(r"\bbetween\b|\brange\b", combined, re.I):
         reasons.append("unsupported_range_contract")
-    normalized_outcomes = tuple(outcome.strip().lower() for outcome in market.outcomes)
     if len(normalized_outcomes) != 2 or set(normalized_outcomes) != {"yes", "no"}:
         reasons.append("unsupported_outcome_shape")
     if asset and asset not in SUPPORTED_ASSETS:
@@ -232,6 +247,114 @@ def parse_contract(
         tradable=tradable,
         preview_only=not tradable,
         rejection_reasons=tuple(reasons),
+        contract_family=DAILY_THRESHOLD_FAMILY,
+        boundary_type="fixed_strike",
+        affirmative_outcome="Yes",
+        negative_outcome="No",
+        series_slug=market.series_slug,
+    )
+
+
+def _parse_short_updown_contract(
+    market: CryptoMarket,
+    *,
+    now: datetime,
+) -> CryptoResolutionRule:
+    question = market.question.strip()
+    description = (market.description or "").strip()
+    asset = _detect_asset(question) or _detect_asset(description) or ""
+    provider = _extract_provider(description)
+    pair = _extract_pair(description)
+    start = market.event_start_time
+    end = market.gamma_end_date
+    interval = _short_interval(market.series_slug, start, end)
+    reasons: list[str] = []
+    required = {
+        "event_id": market.event_id,
+        "condition_id": market.condition_id,
+        "up_token_id": market.yes_token_id,
+        "down_token_id": market.no_token_id,
+        "asset": asset,
+        "settlement_provider": provider,
+        "pair": pair,
+        "window_start_time_utc": start,
+        "target_time_utc": end,
+        "gamma_end_date": market.gamma_end_date,
+        "raw_description": description,
+    }
+    missing = [name for name, value in required.items() if value in (None, "")]
+    if missing:
+        reasons.append(f"missing_contract_fields:{','.join(missing)}")
+
+    outcomes = tuple(outcome.strip().lower() for outcome in market.outcomes)
+    if len(outcomes) != 2 or outcomes != ("up", "down"):
+        reasons.append("unsupported_outcome_shape")
+    if asset not in SHORT_UPDOWN_ASSETS:
+        reasons.append(
+            f"unsupported_asset:{asset}" if asset else "unsupported_or_missing_asset"
+        )
+    if provider and provider != "chainlink":
+        reasons.append(f"unsupported_settlement_provider:{provider}")
+    expected_pair = (
+        asset_contract(asset).chainlink_pair
+        if asset in SHORT_UPDOWN_ASSETS
+        else None
+    )
+    if pair and expected_pair and pair != expected_pair:
+        reasons.append(f"pair_mismatch:expected={expected_pair},actual={pair}")
+    if interval not in {"5m", "15m"}:
+        reasons.append(f"unsupported_window_interval:{interval or 'missing'}")
+    if not re.search(
+        r"end of the time range.*greater than or equal to.*beginning of that range",
+        description,
+        re.I | re.S,
+    ):
+        reasons.append("unsupported_updown_boundary_rule")
+    if not re.search(r"otherwise.*resolve to [\"']?down", description, re.I | re.S):
+        reasons.append("missing_down_resolution_rule")
+    if start is not None and end is not None:
+        start = _as_utc(start)
+        end = _as_utc(end)
+        expected_seconds = 300 if interval == "5m" else 900 if interval == "15m" else None
+        if start >= end:
+            reasons.append("window_time_not_increasing")
+        elif expected_seconds is not None and (end - start).total_seconds() != expected_seconds:
+            reasons.append("window_duration_mismatch")
+    if end is not None and _as_utc(end) <= now:
+        reasons.append("target_time_not_future")
+        reasons.append("gamma_market_expired")
+    reasons.extend(_market_status_reasons(market))
+    reasons = list(dict.fromkeys(reasons))
+    tradable = not reasons
+    return CryptoResolutionRule(
+        event_id=market.event_id,
+        condition_id=market.condition_id,
+        yes_token_id=market.yes_token_id,
+        no_token_id=market.no_token_id,
+        asset=asset,
+        settlement_provider=provider,
+        pair=pair,
+        exact_operator=">=",
+        strike=Decimal("0"),
+        candle_interval=interval,
+        price_field="data_stream_value",
+        timezone="UTC",
+        observation_time="window_start",
+        target_time_utc=_as_utc(end) if end is not None else None,
+        gamma_end_date=_as_utc(end) if end is not None else None,
+        parser_version=PARSER_VERSION,
+        raw_description=description,
+        question=question,
+        rule_confidence=1.0 if tradable else 0.0,
+        tradable=tradable,
+        preview_only=not tradable,
+        rejection_reasons=tuple(reasons),
+        contract_family=SHORT_UPDOWN_FAMILY,
+        boundary_type="window_start_price",
+        window_start_time_utc=_as_utc(start) if start is not None else None,
+        affirmative_outcome="Up",
+        negative_outcome="Down",
+        series_slug=market.series_slug,
     )
 
 
@@ -285,7 +408,11 @@ def _detect_asset(text: str) -> str | None:
     for alias, symbol in ASSET_ALIASES.items():
         if re.search(rf"\b{alias}\b", text, re.I):
             return symbol
-    unsupported = re.search(r"\b(SOL|SOLANA|XRP|DOGE|DOGECOIN|SUI|ADA)\b", text, re.I)
+    unsupported = re.search(
+        r"\b(DOGE|DOGECOIN|BNB|ADA|CARDANO|AVAX|AVALANCHE|SUI|LINK|CHAINLINK)\b",
+        text,
+        re.I,
+    )
     return unsupported.group(1).upper() if unsupported else None
 
 
@@ -331,7 +458,12 @@ def _extract_provider(text: str) -> str | None:
 
 
 def _extract_pair(text: str) -> str | None:
-    match = re.search(r"\b(BTC|ETH)\s*(?:/|-)?\s*(USDT|USD)\b", text, re.I)
+    assets = "|".join(ASSET_CONTRACTS)
+    match = re.search(
+        rf"\b({assets})\s*(?:/|-)?\s*(USDT|USD)\b",
+        text,
+        re.I,
+    )
     if not match:
         return None
     return f"{match.group(1).upper()}/{match.group(2).upper()}"
@@ -343,6 +475,41 @@ def _extract_candle_interval(text: str) -> str | None:
     if re.search(r"\b(1h|1[- ]hour|one[- ]hour)\b", text, re.I):
         return "1h"
     return None
+
+
+def _short_interval(
+    series_slug: str | None,
+    start: datetime | None,
+    end: datetime | None,
+) -> str | None:
+    match = re.search(r"-(5m|15m)$", series_slug or "", re.I)
+    if match:
+        return match.group(1).lower()
+    if start is None or end is None:
+        return None
+    seconds = (_as_utc(end) - _as_utc(start)).total_seconds()
+    return "5m" if seconds == 300 else "15m" if seconds == 900 else None
+
+
+def _market_status_reasons(market: CryptoMarket) -> list[str]:
+    reasons: list[str] = []
+    if market.active is None:
+        reasons.append("market_active_status_unknown")
+    elif not market.active:
+        reasons.append("market_inactive")
+    if market.closed is None:
+        reasons.append("market_closed_status_unknown")
+    elif market.closed:
+        reasons.append("market_closed")
+    if market.accepting_orders is None:
+        reasons.append("market_accepting_orders_status_unknown")
+    elif market.accepting_orders is False:
+        reasons.append("market_not_accepting_orders")
+    if market.enable_order_book is None:
+        reasons.append("market_order_book_status_unknown")
+    elif market.enable_order_book is False:
+        reasons.append("market_order_book_disabled")
+    return reasons
 
 
 def _extract_price_field(text: str) -> str | None:

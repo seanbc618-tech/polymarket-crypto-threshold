@@ -9,6 +9,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+import pytest
 from binance_sdk_spot.websocket_streams.models import KlineResponse
 
 from crypto_threshold.adapters.prices import stream as stream_module
@@ -55,13 +56,16 @@ class FakeConnection:
         self.closed = True
 
 
-def test_normalizes_only_closed_one_minute_close_from_public_sdk_model() -> None:
-    event = KlineResponse.from_dict(_event("BTCUSDT", "100001"))
+@pytest.mark.parametrize("pair", ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT"])
+def test_normalizes_only_closed_one_minute_close_from_public_sdk_model(
+    pair: str,
+) -> None:
+    event = KlineResponse.from_dict(_event(pair, "100001"))
     tick = normalize_binance_kline(event, received_at=NOW)
     assert tick is not None
     assert (tick.provider, tick.pair, tick.candle_interval, tick.price_field) == (
         "binance",
-        "BTCUSDT",
+        pair,
         "1m",
         "Close",
     )
@@ -91,7 +95,7 @@ def test_start_stop_are_idempotent_and_queue_is_bounded_and_coalesced() -> None:
     )
     stream.start()
     stream.start()
-    _wait_for(lambda: len(connection.handles) == 2)
+    _wait_for(lambda: len(connection.handles) == 4)
     connection.handles["btcusdt"].emit("message", _event("BTCUSDT", "100001"))
     connection.handles["btcusdt"].emit("message", _event("BTCUSDT", "100002"))
     connection.handles["ethusdt"].emit("message", _event("ETHUSDT", "3000"))
@@ -183,7 +187,7 @@ def test_stream_reconnects_when_subscribed_connection_stops_emitting() -> None:
     stream.start()
     _wait_for(lambda: stream.health()["detail"]["generation"] >= 2)
     stream.stop()
-    assert connection.kline_calls >= 4
+    assert connection.kline_calls >= 8
 
 
 def _event(pair: str, close: str) -> dict[str, Any]:

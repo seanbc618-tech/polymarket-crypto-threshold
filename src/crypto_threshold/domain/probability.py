@@ -58,3 +58,6 @@ class AnalysisSignal:
     observed_at: datetime
     received_at: datetime
     source_version: str = "market-workflow-v1"
+    contract_family: str = "daily_threshold"
+    affirmative_outcome: str = "Yes"
+    negative_outcome: str = "No"

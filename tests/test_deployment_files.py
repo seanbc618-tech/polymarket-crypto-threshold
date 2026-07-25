@@ -13,6 +13,13 @@ BACKUP_UNIT = (
 TIMESYNCD_CONFIG = (
     ROOT / "deploy" / "timesyncd" / "50-polymarket-vps.conf"
 )
+UPDOWN_ENV_TEMPLATE = ROOT / "deploy" / "env" / "hk-updown-shadow.example.env"
+UPDOWN_SHADOW_UNIT = (
+    ROOT / "deploy" / "systemd" / "crypto-threshold-updown-shadow.service"
+)
+UPDOWN_BACKUP_UNIT = (
+    ROOT / "deploy" / "systemd" / "crypto-threshold-updown-backup.service"
+)
 
 
 def test_vps_environment_is_read_only_direct_connect() -> None:
@@ -60,3 +67,42 @@ def test_vps_timesync_uses_explicit_ipv4_sources() -> None:
 
     assert "NTP=162.159.200.1 216.239.35.0 203.107.6.88" in content
     assert "RootDistanceMaxSec=5" in content
+
+
+def test_updown_environment_is_separate_public_and_read_only() -> None:
+    content = UPDOWN_ENV_TEMPLATE.read_text()
+
+    assert "DATABASE_PATH=/opt/polymarket-crypto-threshold/data/updown-shadow.db" in content
+    assert "SHADOW_CONTRACT_FAMILY=short_updown" in content
+    assert "CHAINLINK_REFERENCE_STREAM_ENABLED=true" in content
+    assert "BINANCE_REFERENCE_STREAM_ENABLED=false" in content
+    assert "SHADOW_ANALYSIS_LIMIT=14" in content
+    assert "TRADING_DISABLED=true" in content
+    assert "POLYMARKET_STREAM_USER_CHANNEL_ENABLED=false" in content
+    assert "POLYMARKET_PRIVATE_KEY" not in content
+    assert "POLYMARKET_FUNDER" not in content
+    assert "API_KEY=" not in content
+
+
+def test_updown_unit_is_independent_hardened_and_secret_free() -> None:
+    content = UPDOWN_SHADOW_UNIT.read_text()
+
+    assert "EnvironmentFile=/etc/polymarket-crypto-updown.env" in content
+    assert "ExecStart=/opt/polymarket-crypto-threshold/.venv/bin/crypto-threshold shadow" in content
+    assert "crypto-threshold-shadow.service" not in content
+    assert "POLYMARKET_PRIVATE_KEY" in content
+    assert "POLYMARKET_FUNDER" in content
+    assert "UnsetEnvironment=" in content
+    assert "HTTP_PROXY" in content
+    assert "ProtectSystem=strict" in content
+    assert "NoNewPrivileges=true" in content
+    assert "BUY" not in content
+    assert "SELL" not in content
+
+
+def test_updown_backup_uses_its_own_database_and_directory() -> None:
+    content = UPDOWN_BACKUP_UNIT.read_text()
+
+    assert "--database /opt/polymarket-crypto-threshold/data/updown-shadow.db" in content
+    assert "--output-dir /opt/polymarket-crypto-threshold/backups/updown" in content
+    assert "RestrictAddressFamilies=AF_UNIX" in content

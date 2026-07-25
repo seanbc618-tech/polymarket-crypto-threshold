@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from urllib.parse import urlparse
@@ -15,9 +16,20 @@ from crypto_threshold.adapters.keychain import KeychainStore
 from crypto_threshold.adapters.polymarket.client import GammaClobReadClient
 from crypto_threshold.adapters.polymarket.stream import PolymarketStreamBridge
 from crypto_threshold.adapters.prices.binance import BinanceProvider
+from crypto_threshold.adapters.prices.chainlink_stream import (
+    ChainlinkReferencePriceStream,
+)
 from crypto_threshold.adapters.prices.coinbase import CoinbaseProvider
 from crypto_threshold.adapters.prices.stream import BinanceReferencePriceStream
 from crypto_threshold.config import get_settings, load_settings
+from crypto_threshold.domain.assets import (
+    DAILY_THRESHOLD_ASSETS,
+    SUPPORTED_CHAINLINK_PAIRS,
+)
+from crypto_threshold.domain.rules import (
+    DAILY_THRESHOLD_FAMILY,
+    SHORT_UPDOWN_FAMILY,
+)
 from crypto_threshold.services.calibration_service import CalibrationService
 from crypto_threshold.services.discovery_service import DiscoveryService
 from crypto_threshold.services.market_workflow_service import MarketWorkflowService
@@ -158,6 +170,26 @@ def doctor(
             ),
         )
     )
+    checks.append(
+        (
+            "shadow_reference_contract",
+            (
+                settings.SHADOW_CONTRACT_FAMILY == DAILY_THRESHOLD_FAMILY
+                or settings.CHAINLINK_REFERENCE_STREAM_ENABLED
+            )
+            and (
+                not settings.CHAINLINK_REFERENCE_STREAM_ENABLED
+                or settings.SHADOW_ENABLED
+            ),
+            (
+                "daily Binance REST/stream reference"
+                if settings.SHADOW_CONTRACT_FAMILY == DAILY_THRESHOLD_FAMILY
+                else "short Up/Down Chainlink public stream"
+                if settings.CHAINLINK_REFERENCE_STREAM_ENABLED
+                else "short Up/Down requires Chainlink public stream"
+            ),
+        )
+    )
     for name, value in (
         ("gamma_url", settings.POLYMARKET_GAMMA_API_BASE),
         ("clob_url", settings.POLYMARKET_CLOB_API_BASE),
@@ -185,29 +217,101 @@ def doctor(
         binance = BinanceProvider(settings.BINANCE_API_BASE)
         coinbase = CoinbaseProvider(settings.COINBASE_API_BASE)
         try:
-            discovered = polymarket.discover_markets("BTC", 1)
-            checks.append(("gamma_read", True, f"response_markets={len(discovered)}"))
+            if settings.SHADOW_CONTRACT_FAMILY == SHORT_UPDOWN_FAMILY:
+                now = datetime.now(UTC)
+                discovered = polymarket.discover_updown_markets(
+                    ("5m", "15m"),
+                    start=now - timedelta(minutes=16),
+                    end=now + timedelta(minutes=16),
+                    limit=50,
+                )
+                checks.append(
+                    (
+                        "gamma_read_short_updown",
+                        len(discovered) >= 14,
+                        f"response_markets={len(discovered)}",
+                    )
+                )
+            else:
+                for asset in sorted(DAILY_THRESHOLD_ASSETS):
+                    discovered = polymarket.discover_markets(asset, 1)
+                    checks.append(
+                        (
+                            f"gamma_read_{asset}",
+                            bool(discovered),
+                            f"response_markets={len(discovered)}",
+                        )
+                    )
         except Exception as exc:
-            checks.append(("gamma_read", False, f"{type(exc).__name__}: {exc}"))
+            checks.append(("gamma_reads", False, f"{type(exc).__name__}: {exc}"))
         try:
             server_time = polymarket.get_server_time()
             checks.append(("clob_read", True, f"server_time={server_time}"))
         except Exception as exc:
             checks.append(("clob_read", False, f"{type(exc).__name__}: {exc}"))
-        try:
-            primary = binance.get_ticker_price("BTC")
-            checks.append(("binance_read", primary.price > 0, str(primary.price)))
-        except Exception as exc:
-            checks.append(("binance_read", False, f"{type(exc).__name__}: {exc}"))
-        try:
-            secondary = coinbase.get_spot_price("BTC")
-            checks.append(("coinbase_read", secondary.price > 0, str(secondary.price)))
-        except Exception as exc:
-            checks.append(("coinbase_read", False, f"{type(exc).__name__}: {exc}"))
-        finally:
-            polymarket.close()
-            binance.close()
-            coinbase.close()
+        if settings.SHADOW_CONTRACT_FAMILY == SHORT_UPDOWN_FAMILY:
+            stream = ChainlinkReferencePriceStream(
+                stale_seconds=settings.CHAINLINK_REFERENCE_STREAM_STALE_SECONDS,
+                history_seconds=settings.CHAINLINK_REFERENCE_STREAM_HISTORY_SECONDS,
+                max_ticks_per_pair=(
+                    settings.CHAINLINK_REFERENCE_STREAM_MAX_TICKS_PER_PAIR
+                ),
+            )
+            try:
+                stream.start()
+                deadline = time.monotonic() + 12
+                fresh_pairs: set[str] = set()
+                while time.monotonic() < deadline:
+                    detail = stream.health().get("detail")
+                    if isinstance(detail, dict):
+                        fresh_pairs = {
+                            str(pair).upper()
+                            for pair in detail.get("fresh_pairs", [])
+                        }
+                    if fresh_pairs == set(SUPPORTED_CHAINLINK_PAIRS):
+                        break
+                    time.sleep(0.1)
+                checks.append(
+                    (
+                        "chainlink_stream_reads",
+                        fresh_pairs == set(SUPPORTED_CHAINLINK_PAIRS),
+                        f"fresh_pairs={sorted(fresh_pairs)}",
+                    )
+                )
+            except Exception as exc:
+                checks.append(
+                    (
+                        "chainlink_stream_reads",
+                        False,
+                        f"{type(exc).__name__}: {exc}",
+                    )
+                )
+            finally:
+                stream.stop()
+        else:
+            try:
+                for asset in sorted(DAILY_THRESHOLD_ASSETS):
+                    primary = binance.get_ticker_price(asset)
+                    checks.append(
+                        (f"binance_read_{asset}", primary.price > 0, str(primary.price))
+                    )
+            except Exception as exc:
+                checks.append(("binance_reads", False, f"{type(exc).__name__}: {exc}"))
+            try:
+                for asset in sorted(DAILY_THRESHOLD_ASSETS):
+                    secondary = coinbase.get_spot_price(asset)
+                    checks.append(
+                        (
+                            f"coinbase_read_{asset}",
+                            secondary.price > 0,
+                            str(secondary.price),
+                        )
+                    )
+            except Exception as exc:
+                checks.append(("coinbase_reads", False, f"{type(exc).__name__}: {exc}"))
+        polymarket.close()
+        binance.close()
+        coinbase.close()
 
     console.print("[bold]crypto-threshold doctor[/]")
     for name, ok, detail in checks:
@@ -219,7 +323,7 @@ def doctor(
 
 @app.command()
 def prices(
-    asset: str = typer.Option("BTC", help="Asset to fetch (BTC or ETH)"),
+    asset: str = typer.Option("BTC", help="Asset to fetch (BTC, ETH, SOL, or XRP)"),
 ) -> None:
     """Fetch Binance and Coinbase read-only sanity prices."""
     settings = get_settings()
@@ -256,8 +360,10 @@ def prices(
 
 @app.command()
 def discover(
-    asset: str | None = typer.Option(None, help="Optional BTC or ETH filter"),
-    limit: int = typer.Option(100, min=1, max=500),
+    asset: str | None = typer.Option(
+        None, help="Optional BTC, ETH, SOL, or XRP filter"
+    ),
+    limit: int = typer.Option(100, min=1, max=1000),
 ) -> None:
     """Discover Gamma markets and persist raw payloads plus parsed rules."""
     settings = get_settings()
@@ -385,7 +491,12 @@ def settle(
     database.initialize()
     repository = Repository(database)
     binance = BinanceProvider(settings.BINANCE_API_BASE)
-    service = SettlementService(repository=repository, binance=binance)
+    client = GammaClobReadClient(settings)
+    service = SettlementService(
+        repository=repository,
+        binance=binance,
+        client=client,
+    )
     try:
         labels = (
             (service.settle_market(market_id),)
@@ -396,6 +507,7 @@ def settle(
         console.print(f"[red]Settlement failed:[/] {type(exc).__name__}: {exc}")
         raise typer.Exit(code=2) from exc
     finally:
+        client.close()
         binance.close()
     console.print(f"Persisted {len(labels)} immutable settlement labels")
 
@@ -403,13 +515,23 @@ def settle(
 @app.command("replay-build")
 def replay_build(
     name: str = typer.Option(..., "--name"),
+    family: str = typer.Option(
+        DAILY_THRESHOLD_FAMILY,
+        "--family",
+        help="Contract family: daily_threshold or short_updown",
+    ),
 ) -> None:
     """Seal an offline replay manifest from exact analyzed inputs and labels."""
     settings = get_settings()
     database = Database(settings.DATABASE_PATH)
     database.initialize()
     try:
-        result = ReplayService(Repository(database)).build(name)
+        if family not in {DAILY_THRESHOLD_FAMILY, SHORT_UPDOWN_FAMILY}:
+            raise ValueError(f"unsupported contract family: {family}")
+        result = ReplayService(Repository(database)).build(
+            name,
+            contract_family=family,
+        )
     except Exception as exc:
         console.print(f"[red]Replay build failed:[/] {type(exc).__name__}: {exc}")
         raise typer.Exit(code=2) from exc
@@ -540,6 +662,14 @@ def shadow(
     ):
         console.print("[red]Unsafe shadow configuration; refusing to start.[/]")
         raise typer.Exit(code=2)
+    if (
+        settings.SHADOW_CONTRACT_FAMILY == SHORT_UPDOWN_FAMILY
+        and not settings.CHAINLINK_REFERENCE_STREAM_ENABLED
+    ):
+        console.print(
+            "[red]short_updown shadow requires the public Chainlink stream.[/]"
+        )
+        raise typer.Exit(code=2)
     database = Database(settings.DATABASE_PATH)
     database.initialize()
     repository = Repository(database)
@@ -570,7 +700,24 @@ def shadow(
             stream_url=settings.BINANCE_STREAM_URL,
             proxy_url=settings.BINANCE_STREAM_PROXY_URL,
         )
-        if settings.BINANCE_REFERENCE_STREAM_ENABLED
+        if (
+            settings.SHADOW_CONTRACT_FAMILY == DAILY_THRESHOLD_FAMILY
+            and settings.BINANCE_REFERENCE_STREAM_ENABLED
+        )
+        else None
+    )
+    chainlink_stream = (
+        ChainlinkReferencePriceStream(
+            stale_seconds=settings.CHAINLINK_REFERENCE_STREAM_STALE_SECONDS,
+            history_seconds=settings.CHAINLINK_REFERENCE_STREAM_HISTORY_SECONDS,
+            max_ticks_per_pair=(
+                settings.CHAINLINK_REFERENCE_STREAM_MAX_TICKS_PER_PAIR
+            ),
+        )
+        if (
+            settings.SHADOW_CONTRACT_FAMILY == SHORT_UPDOWN_FAMILY
+            and settings.CHAINLINK_REFERENCE_STREAM_ENABLED
+        )
         else None
     )
     workflow = MarketWorkflowService(
@@ -580,6 +727,7 @@ def shadow(
         coinbase=coinbase,
         settings=settings,
         stream_coordinator=stream_coordinator,
+        chainlink_stream=chainlink_stream,
     )
     monitor = ShadowMonitorService(
         repository=repository,
@@ -588,9 +736,15 @@ def shadow(
         paper=PaperLedgerService(
             repository, min_net_ev=settings.PAPER_MIN_NET_EV
         ),
-        settlement=SettlementService(repository=repository, binance=binance),
+        settlement=SettlementService(
+            repository=repository,
+            binance=binance,
+            client=client,
+        ),
         stream_coordinator=stream_coordinator,
         reference_stream=reference_stream,
+        chainlink_stream=chainlink_stream,
+        contract_family=settings.SHADOW_CONTRACT_FAMILY,
         discovery_limit=settings.SHADOW_DISCOVERY_LIMIT,
         analysis_limit=settings.SHADOW_ANALYSIS_LIMIT,
     )

@@ -7,8 +7,22 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
-from crypto_threshold.adapters.prices.stream import BinanceReferencePriceStream
+from crypto_threshold.adapters.prices.chainlink_stream import (
+    ChainlinkReferencePriceStream,
+)
+from crypto_threshold.adapters.prices.stream import (
+    BinanceReferencePriceStream,
+    ReferencePriceTick,
+)
+from crypto_threshold.domain.assets import (
+    asset_for_binance_symbol,
+    asset_for_chainlink_pair,
+)
 from crypto_threshold.domain.research import ShadowCycleResult
+from crypto_threshold.domain.rules import (
+    DAILY_THRESHOLD_FAMILY,
+    SHORT_UPDOWN_FAMILY,
+)
 from crypto_threshold.services.discovery_service import DiscoveryService
 from crypto_threshold.services.market_workflow_service import MarketWorkflowService
 from crypto_threshold.services.paper_ledger_service import PaperLedgerService
@@ -33,7 +47,9 @@ class ShadowMonitorService:
         settlement: SettlementService | None = None,
         stream_coordinator: StreamResearchCoordinator | None = None,
         reference_stream: BinanceReferencePriceStream | None = None,
+        chainlink_stream: ChainlinkReferencePriceStream | None = None,
         schema_monitor: ExternalPayloadSchemaMonitor | None = None,
+        contract_family: str = DAILY_THRESHOLD_FAMILY,
         discovery_limit: int = 20,
         analysis_limit: int = 10,
         clock: Callable[[], datetime] | None = None,
@@ -45,7 +61,11 @@ class ShadowMonitorService:
         self.settlement = settlement
         self.stream_coordinator = stream_coordinator
         self.reference_stream = reference_stream
+        self.chainlink_stream = chainlink_stream
         self.schema_monitor = schema_monitor or ExternalPayloadSchemaMonitor(repository)
+        if contract_family not in {DAILY_THRESHOLD_FAMILY, SHORT_UPDOWN_FAMILY}:
+            raise ValueError(f"unsupported shadow contract family: {contract_family}")
+        self.contract_family = contract_family
         self.discovery_limit = discovery_limit
         self.analysis_limit = analysis_limit
         self.clock = clock or (lambda: datetime.now(UTC))
@@ -55,8 +75,12 @@ class ShadowMonitorService:
             self.stream_coordinator.start()
         if self.reference_stream is not None:
             self.reference_stream.start()
+        if self.chainlink_stream is not None:
+            self.chainlink_stream.start()
 
     def stop(self) -> None:
+        if self.chainlink_stream is not None:
+            self.chainlink_stream.stop()
         if self.reference_stream is not None:
             self.reference_stream.stop()
         if self.stream_coordinator is not None:
@@ -73,7 +97,11 @@ class ShadowMonitorService:
         stream_health: dict[str, Any] = {}
         payload_boundary = self.schema_monitor.capture_boundary()
         try:
-            results = self.discovery.discover(limit=self.discovery_limit)
+            results = (
+                self.discovery.discover_updown(limit=self.discovery_limit)
+                if self.contract_family == SHORT_UPDOWN_FAMILY
+                else self.discovery.discover(limit=self.discovery_limit)
+            )
             discovered = len(results)
             eligible = {
                 result.market.market_id: result
@@ -99,26 +127,13 @@ class ShadowMonitorService:
                 reference_health = dict(self.reference_stream.health())
                 ticks = self.reference_stream.drain()
                 reference_health["drained_ticks"] = len(ticks)
-                reference_health["drained_tick_evidence"] = [
-                    {
-                        "provider": tick.provider,
-                        "pair": tick.pair,
-                        "candle_interval": tick.candle_interval,
-                        "price_field": tick.price_field,
-                        "provider_timestamp": tick.provider_timestamp.isoformat(),
-                        "received_at": tick.received_at.isoformat(),
-                        "fresh": tick.fresh,
-                        "sequence": tick.sequence,
-                        "payload_hash": tick.payload_hash,
-                        "source_version": tick.source_version,
-                    }
-                    for tick in ticks
-                ]
+                reference_health["drained_tick_evidence"] = _tick_evidence(ticks)
                 stream_health["binance_reference"] = reference_health
                 assets = {
-                    "BTC" if tick.pair == "BTCUSDT" else "ETH"
+                    asset
                     for tick in ticks
                     if tick.fresh
+                    if (asset := asset_for_binance_symbol(tick.pair)) is not None
                 }
                 target_market_ids.extend(
                     market_id
@@ -129,6 +144,28 @@ class ShadowMonitorService:
                     rest_fallback = True
             else:
                 stream_health["binance_reference"] = {"status": "disabled"}
+
+            if self.chainlink_stream is not None:
+                chainlink_health = dict(self.chainlink_stream.health())
+                chainlink_ticks = self.chainlink_stream.drain()
+                chainlink_health["drained_ticks"] = len(chainlink_ticks)
+                chainlink_health["drained_tick_evidence"] = _tick_evidence(
+                    chainlink_ticks
+                )
+                stream_health["chainlink_reference"] = chainlink_health
+                assets = {
+                    asset
+                    for tick in chainlink_ticks
+                    if tick.fresh
+                    if (asset := asset_for_chainlink_pair(tick.pair)) is not None
+                }
+                target_market_ids.extend(
+                    market_id
+                    for market_id, result in eligible.items()
+                    if result.rule.asset in assets
+                )
+            else:
+                stream_health["chainlink_reference"] = {"status": "disabled"}
 
             if rest_fallback:
                 target_market_ids.extend(eligible)
@@ -178,6 +215,7 @@ class ShadowMonitorService:
             reasons.append(f"schema_drift_monitor_error:{type(exc).__name__}")
         stream_health.setdefault("polymarket", {"status": "degraded"})
         stream_health.setdefault("binance_reference", {"status": "degraded"})
+        stream_health.setdefault("chainlink_reference", {"status": "degraded"})
 
         completed_at = _utc(self.clock())
         status = (
@@ -199,6 +237,7 @@ class ShadowMonitorService:
             started_at=started_at,
             completed_at=completed_at,
             source_version=SHADOW_SOURCE_VERSION,
+            contract_family=self.contract_family,
         )
         self.repository.save_shadow_cycle(cycle)
         return cycle
@@ -208,3 +247,23 @@ def _utc(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=UTC)
     return value.astimezone(UTC)
+
+
+def _tick_evidence(
+    ticks: tuple[ReferencePriceTick, ...],
+) -> list[dict[str, object]]:
+    return [
+        {
+            "provider": tick.provider,
+            "pair": tick.pair,
+            "candle_interval": tick.candle_interval,
+            "price_field": tick.price_field,
+            "provider_timestamp": tick.provider_timestamp.isoformat(),
+            "received_at": tick.received_at.isoformat(),
+            "fresh": tick.fresh,
+            "sequence": tick.sequence,
+            "payload_hash": tick.payload_hash,
+            "source_version": tick.source_version,
+        }
+        for tick in ticks
+    ]

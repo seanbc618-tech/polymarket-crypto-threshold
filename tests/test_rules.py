@@ -5,6 +5,8 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from decimal import Decimal
 
+import pytest
+
 from crypto_threshold.adapters.polymarket.translator import translate_market
 from crypto_threshold.domain.rules import parse_contract, threshold_satisfied
 from tests.conftest import NOW, make_market_payload
@@ -37,6 +39,48 @@ def test_complete_supported_contract_is_tradable() -> None:
         "12:00:00",
     )
     assert rule.raw_description
+
+
+@pytest.mark.parametrize(
+    ("asset", "name", "strike", "pair"),
+    [
+        ("BTC", "Bitcoin", "100000", "BTC/USDT"),
+        ("ETH", "Ethereum", "2000", "ETH/USDT"),
+        ("SOL", "Solana", "50", "SOL/USDT"),
+        ("XRP", "XRP", "0.60", "XRP/USDT"),
+    ],
+)
+def test_supported_asset_contracts_share_the_exact_binance_rule(
+    asset: str,
+    name: str,
+    strike: str,
+    pair: str,
+) -> None:
+    rule = _parse(
+        question=f"Will the price of {name} be above ${strike} on July 23, 2026?",
+        description=(
+            f"This market resolves Yes using the Binance {pair} 1-minute "
+            "candle Close price at 12:00 PM ET."
+        ),
+    )
+    assert rule.tradable
+    assert (rule.asset, rule.pair, rule.strike) == (
+        asset,
+        pair,
+        Decimal(strike),
+    )
+
+
+def test_unlisted_asset_remains_preview_only() -> None:
+    rule = _parse(
+        question="Will the price of Dogecoin be above $1 on July 23, 2026?",
+        description=(
+            "This market resolves Yes using the Binance DOGE/USDT 1-minute "
+            "candle Close price at 12:00 PM ET."
+        ),
+    )
+    assert not rule.tradable
+    assert "unsupported_asset:DOGE" in rule.rejection_reasons
 
 
 def test_noon_et_converts_across_dst_and_standard_time() -> None:

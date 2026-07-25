@@ -28,6 +28,8 @@ class CryptoMarket:
     no_token_id: str | None
     received_at: datetime
     raw_payload: dict[str, Any]
+    event_start_time: datetime | None = None
+    series_slug: str | None = None
 
 
 @dataclass(frozen=True)

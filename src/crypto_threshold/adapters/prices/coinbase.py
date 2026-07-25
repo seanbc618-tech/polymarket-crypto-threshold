@@ -8,15 +8,20 @@ from decimal import Decimal
 
 import httpx
 
+from crypto_threshold.domain.assets import ASSET_CONTRACTS, DAILY_THRESHOLD_ASSETS
 from crypto_threshold.domain.prices import PriceSnapshot
 
 COINBASE_API = "https://api.coinbase.com/v2"
 COINBASE_SOURCE_VERSION = "coinbase-prices-v2"
-ASSET_SYMBOLS = {"BTC": "BTC-USD", "ETH": "ETH-USD"}
+ASSET_SYMBOLS = {
+    asset: ASSET_CONTRACTS[asset].coinbase_symbol
+    for asset in DAILY_THRESHOLD_ASSETS
+    if ASSET_CONTRACTS[asset].coinbase_symbol is not None
+}
 
 
 class CoinbaseProvider:
-    """Fetch public BTC/ETH USD spot prices for sanity checking only."""
+    """Fetch supported public USD spot prices for sanity checking only."""
 
     def __init__(
         self,

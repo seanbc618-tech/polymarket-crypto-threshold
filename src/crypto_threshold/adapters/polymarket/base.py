@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Protocol
 
 
@@ -17,7 +18,18 @@ class PolymarketReadClient(Protocol):
 
     def discover_markets(self, asset: str | None, limit: int) -> list[dict[str, Any]]: ...
 
+    def discover_updown_markets(
+        self,
+        intervals: tuple[str, ...],
+        *,
+        start: datetime,
+        end: datetime,
+        limit: int,
+    ) -> list[dict[str, Any]]: ...
+
     def get_market(self, market_id: str) -> dict[str, Any]: ...
+
+    def get_event(self, event_id: str) -> dict[str, Any]: ...
 
     def get_market_event_context(
         self, market_id: str, condition_id: str | None, question: str

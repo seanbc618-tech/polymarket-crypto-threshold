@@ -7,7 +7,7 @@ from contextlib import closing, contextmanager
 from pathlib import Path
 from sqlite3 import Connection, Row, complete_statement, connect
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -37,6 +37,8 @@ CREATE TABLE IF NOT EXISTS markets (
     raw_observed_at TEXT,
     raw_received_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     source_version TEXT NOT NULL DEFAULT 'gamma-v1',
+    event_start_time TEXT,
+    series_slug TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -72,6 +74,12 @@ CREATE TABLE IF NOT EXISTS resolution_rules (
     observed_at TEXT,
     received_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     source_version TEXT NOT NULL DEFAULT 'contract-parser-v1',
+    contract_family TEXT NOT NULL DEFAULT 'daily_threshold',
+    boundary_type TEXT NOT NULL DEFAULT 'fixed_strike',
+    window_start_time_utc TEXT,
+    affirmative_outcome TEXT NOT NULL DEFAULT 'Yes',
+    negative_outcome TEXT NOT NULL DEFAULT 'No',
+    series_slug TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -194,6 +202,9 @@ CREATE TABLE IF NOT EXISTS analysis_signals (
     observed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     received_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     source_version TEXT NOT NULL DEFAULT 'market-workflow-v1',
+    contract_family TEXT NOT NULL DEFAULT 'daily_threshold',
+    affirmative_outcome TEXT NOT NULL DEFAULT 'Yes',
+    negative_outcome TEXT NOT NULL DEFAULT 'No',
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -223,6 +234,7 @@ CREATE TABLE IF NOT EXISTS settlement_labels (
     observed_at TEXT NOT NULL,
     received_at TEXT NOT NULL,
     source_version TEXT NOT NULL,
+    contract_family TEXT NOT NULL DEFAULT 'daily_threshold',
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     UNIQUE (market_id, target_time_utc, source_version)
 );
@@ -309,7 +321,8 @@ CREATE TABLE IF NOT EXISTS shadow_cycles (
     reasons TEXT NOT NULL,
     source_version TEXT NOT NULL,
     started_at TEXT NOT NULL,
-    completed_at TEXT NOT NULL
+    completed_at TEXT NOT NULL,
+    contract_family TEXT NOT NULL DEFAULT 'daily_threshold'
 );
 
 CREATE TRIGGER IF NOT EXISTS protect_settlement_labels_update
@@ -408,6 +421,8 @@ MARKET_COLUMNS: dict[str, str] = {
     "raw_observed_at": "TEXT",
     "raw_received_at": "TEXT",
     "source_version": "TEXT NOT NULL DEFAULT 'gamma-v1'",
+    "event_start_time": "TEXT",
+    "series_slug": "TEXT",
 }
 
 RULE_COLUMNS: dict[str, str] = {
@@ -429,6 +444,12 @@ RULE_COLUMNS: dict[str, str] = {
     "received_at": "TEXT",
     "source_version": "TEXT NOT NULL DEFAULT 'contract-parser-v1'",
     "updated_at": "TEXT",
+    "contract_family": "TEXT NOT NULL DEFAULT 'daily_threshold'",
+    "boundary_type": "TEXT NOT NULL DEFAULT 'fixed_strike'",
+    "window_start_time_utc": "TEXT",
+    "affirmative_outcome": "TEXT NOT NULL DEFAULT 'Yes'",
+    "negative_outcome": "TEXT NOT NULL DEFAULT 'No'",
+    "series_slug": "TEXT",
 }
 
 PRICE_COLUMNS: dict[str, str] = {
@@ -469,10 +490,21 @@ SIGNAL_COLUMNS: dict[str, str] = {
     "observed_at": "TEXT",
     "received_at": "TEXT",
     "source_version": "TEXT NOT NULL DEFAULT 'market-workflow-v1'",
+    "contract_family": "TEXT NOT NULL DEFAULT 'daily_threshold'",
+    "affirmative_outcome": "TEXT NOT NULL DEFAULT 'Yes'",
+    "negative_outcome": "TEXT NOT NULL DEFAULT 'No'",
 }
 
 EXTERNAL_PAYLOAD_COLUMNS: dict[str, str] = {
     "analysis_run_id": "TEXT",
+}
+
+SETTLEMENT_LABEL_COLUMNS: dict[str, str] = {
+    "contract_family": "TEXT NOT NULL DEFAULT 'daily_threshold'",
+}
+
+SHADOW_CYCLE_COLUMNS: dict[str, str] = {
+    "contract_family": "TEXT NOT NULL DEFAULT 'daily_threshold'",
 }
 
 ANALYSIS_SIGNALS_V2 = """
@@ -513,6 +545,9 @@ CREATE TABLE analysis_signals (
     observed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     received_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     source_version TEXT NOT NULL DEFAULT 'market-workflow-v1',
+    contract_family TEXT NOT NULL DEFAULT 'daily_threshold',
+    affirmative_outcome TEXT NOT NULL DEFAULT 'Yes',
+    negative_outcome TEXT NOT NULL DEFAULT 'No',
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 )
 """
@@ -566,6 +601,8 @@ class Database:
             _ensure_columns(connection, "external_payloads", EXTERNAL_PAYLOAD_COLUMNS)
             _rebuild_legacy_analysis_signals(connection)
             _execute_statements(connection, PHASE2_SCHEMA)
+            _ensure_columns(connection, "settlement_labels", SETTLEMENT_LABEL_COLUMNS)
+            _ensure_columns(connection, "shadow_cycles", SHADOW_CYCLE_COLUMNS)
             _execute_statements(connection, INDEXES)
             connection.execute(
                 "INSERT OR IGNORE INTO schema_meta (id, version) VALUES (1, ?)",

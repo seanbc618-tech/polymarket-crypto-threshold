@@ -23,6 +23,8 @@ def translate_market(
     received_at = _as_utc(received_at or datetime.now(UTC))
     events = _jsonish_list(payload.get("events"))
     event = events[0] if events and isinstance(events[0], dict) else {}
+    series = _jsonish_list(event.get("series"))
+    series_item = series[0] if series and isinstance(series[0], dict) else {}
     event_id = _string(payload.get("eventId") or event.get("id"))
     outcomes = tuple(str(item) for item in _jsonish_list(payload.get("outcomes")))
     token_ids = _jsonish_list(payload.get("clobTokenIds"))
@@ -51,6 +53,14 @@ def translate_market(
         no_token_id=no_token,
         received_at=received_at,
         raw_payload=payload,
+        event_start_time=_datetime(
+            payload.get("eventStartTime") or event.get("startTime")
+        ),
+        series_slug=_string(
+            payload.get("seriesSlug")
+            or event.get("seriesSlug")
+            or series_item.get("slug")
+        ),
     )
 
 
@@ -98,10 +108,13 @@ def _yes_no_tokens(
     outcomes: tuple[str, ...], token_ids: list[Any], raw_tokens: Any
 ) -> tuple[str | None, str | None]:
     normalized = [outcome.strip().lower() for outcome in outcomes]
-    if len(token_ids) >= 2 and "yes" in normalized and "no" in normalized:
+    supported_pairs = (("yes", "no"), ("up", "down"))
+    for affirmative, negative in supported_pairs:
+        if len(token_ids) < 2 or affirmative not in normalized or negative not in normalized:
+            continue
         return (
-            _string(token_ids[normalized.index("yes")]),
-            _string(token_ids[normalized.index("no")]),
+            _string(token_ids[normalized.index(affirmative)]),
+            _string(token_ids[normalized.index(negative)]),
         )
     tokens = _jsonish_list(raw_tokens)
     mapped: dict[str, str] = {}
@@ -110,9 +123,12 @@ def _yes_no_tokens(
             continue
         outcome = str(token.get("outcome") or "").strip().lower()
         token_id = _string(token.get("token_id") or token.get("tokenId") or token.get("id"))
-        if outcome in {"yes", "no"} and token_id:
+        if outcome in {"yes", "no", "up", "down"} and token_id:
             mapped[outcome] = token_id
-    return mapped.get("yes"), mapped.get("no")
+    return (
+        mapped.get("yes") or mapped.get("up"),
+        mapped.get("no") or mapped.get("down"),
+    )
 
 
 def _levels(raw: Any, *, reverse: bool) -> tuple[OrderBookLevel, ...]:

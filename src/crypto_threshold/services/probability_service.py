@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import math
 import statistics
+from collections.abc import Sequence
+from datetime import datetime
 from decimal import Decimal
 
 from crypto_threshold.domain.prices import KlineSeries
@@ -88,6 +90,35 @@ def annualized_realized_volatility(series: KlineSeries) -> Decimal | None:
         return None
     periods = 365 if series.interval == "1d" else 365 * 24 * 60
     return Decimal(str(statistics.stdev(returns) * math.sqrt(periods)))
+
+
+def annualized_tick_volatility(
+    observations: Sequence[tuple[datetime, Decimal]],
+    *,
+    sample_seconds: int = 5,
+    min_samples: int = 12,
+) -> Decimal | None:
+    """Annualize log returns after deterministic fixed-width downsampling."""
+    if sample_seconds < 1 or min_samples < 3:
+        raise ValueError("invalid tick volatility bounds")
+    buckets: dict[int, Decimal] = {}
+    for observed_at, price in sorted(observations, key=lambda item: item[0]):
+        if price <= 0:
+            continue
+        bucket = int(observed_at.timestamp()) // sample_seconds
+        buckets[bucket] = price
+    prices = [float(price) for _, price in sorted(buckets.items())]
+    if len(prices) < min_samples:
+        return None
+    returns = [
+        math.log(current / previous)
+        for previous, current in zip(prices, prices[1:])
+        if previous > 0 and current > 0
+    ]
+    if len(returns) < min_samples - 1:
+        return None
+    periods_per_year = (365.25 * 24 * 60 * 60) / sample_seconds
+    return Decimal(str(statistics.stdev(returns) * math.sqrt(periods_per_year)))
 
 
 def _terminal_probability(

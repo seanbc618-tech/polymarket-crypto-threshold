@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from uuid import uuid4
 
@@ -16,7 +16,11 @@ from crypto_threshold.adapters.polymarket.translator import (
     translate_order_book,
 )
 from crypto_threshold.adapters.prices.binance import BinanceProvider
+from crypto_threshold.adapters.prices.chainlink_stream import (
+    ChainlinkReferencePriceStream,
+)
 from crypto_threshold.adapters.prices.coinbase import CoinbaseProvider
+from crypto_threshold.adapters.prices.stream import ReferencePriceTick
 from crypto_threshold.config import Settings
 from crypto_threshold.domain.fees import (
     FEE_SOURCE_VERSION,
@@ -31,10 +35,15 @@ from crypto_threshold.domain.markets import (
 )
 from crypto_threshold.domain.prices import PriceCrossCheck, PriceSnapshot
 from crypto_threshold.domain.probability import AnalysisSignal, ProbabilityEstimate
-from crypto_threshold.domain.rules import CryptoResolutionRule, parse_contract
+from crypto_threshold.domain.rules import (
+    SHORT_UPDOWN_FAMILY,
+    CryptoResolutionRule,
+    parse_contract,
+)
 from crypto_threshold.services.pricing_service import cross_check_prices
 from crypto_threshold.services.probability_service import (
     annualized_realized_volatility,
+    annualized_tick_volatility,
     estimate_threshold_probability,
 )
 from crypto_threshold.services.stream_research_service import (
@@ -65,6 +74,7 @@ class MarketWorkflowService:
         settings: Settings,
         clock: Callable[[], datetime] | None = None,
         stream_coordinator: StreamResearchCoordinator | None = None,
+        chainlink_stream: ChainlinkReferencePriceStream | None = None,
     ) -> None:
         self.client = client
         self.repository = repository
@@ -73,6 +83,7 @@ class MarketWorkflowService:
         self.settings = settings
         self.clock = clock or (lambda: datetime.now(UTC))
         self.stream_coordinator = stream_coordinator
+        self.chainlink_stream = chainlink_stream
 
     def analyze(
         self, market_id: str, *, target_size_usdc: Decimal | None = None
@@ -144,17 +155,26 @@ class MarketWorkflowService:
                 market.market_id, rule, target, reasons, now, audit=audit
             )
 
+        affirmative = rule.affirmative_outcome.upper()
+        negative = rule.negative_outcome.upper()
         yes_book = self._book(
-            market.market_id, rule.yes_token_id, "YES", reasons, audit
+            market.market_id, rule.yes_token_id, affirmative, reasons, audit
         )
         no_book = self._book(
-            market.market_id, rule.no_token_id, "NO", reasons, audit
+            market.market_id, rule.no_token_id, negative, reasons, audit
         )
         fee_schedule = self._fee_schedule(market.market_id, rule, reasons, audit)
-        primary, volatility = self._binance_inputs(
-            market.market_id, rule, reasons, audit
-        )
-        secondary = self._coinbase_input(market.market_id, rule, reasons, audit)
+        threshold = rule.strike
+        secondary: PriceSnapshot | None = None
+        if rule.contract_family == SHORT_UPDOWN_FAMILY:
+            primary, threshold, volatility = self._chainlink_inputs(
+                market.market_id, rule, reasons, audit
+            )
+        else:
+            primary, volatility = self._binance_inputs(
+                market.market_id, rule, reasons, audit
+            )
+            secondary = self._coinbase_input(market.market_id, rule, reasons, audit)
         decision_at = _utc(self.clock())
 
         cross_check: PriceCrossCheck | None = None
@@ -176,17 +196,27 @@ class MarketWorkflowService:
                 reasons.append("price_cross_check_failed")
 
         estimate: ProbabilityEstimate | None = None
-        if primary is not None and rule.target_time_utc is not None:
+        if (
+            primary is not None
+            and threshold > 0
+            and rule.target_time_utc is not None
+        ):
             hours = Decimal(
                 str((rule.target_time_utc - decision_at).total_seconds() / 3600)
             )
             estimate = estimate_threshold_probability(
                 spot_price=primary.price,
-                threshold=rule.strike,
+                threshold=threshold,
                 time_to_deadline_hours=hours,
                 realized_volatility=volatility,
                 operator=rule.exact_operator,
             )
+            if rule.contract_family == SHORT_UPDOWN_FAMILY:
+                estimate = replace(
+                    estimate,
+                    model_name="gbm_window_direction",
+                    model_version="gbm-window-direction-v1",
+                )
             if not estimate.accepted:
                 reasons.append(estimate.rejection_reason or "probability_rejected")
 
@@ -199,16 +229,17 @@ class MarketWorkflowService:
                 reasons.extend(f"{outcome}_{reason}" for reason in execution.reasons)
 
         reasons = list(dict.fromkeys(reasons))
-        complete_inputs = (
+        complete_inputs: tuple[object | None, ...] = (
             yes_book,
             no_book,
             fee_schedule,
             primary,
-            secondary,
             estimate,
             yes_execution,
             no_execution,
         )
+        if rule.contract_family != SHORT_UPDOWN_FAMILY:
+            complete_inputs += (secondary,)
         if reasons or not all(complete_inputs):
             return self._save_rejected(
                 market.market_id,
@@ -222,6 +253,7 @@ class MarketWorkflowService:
                 yes_execution=yes_execution,
                 no_execution=no_execution,
                 fee_schedule=fee_schedule,
+                threshold=threshold,
                 audit=audit,
             )
 
@@ -266,7 +298,7 @@ class MarketWorkflowService:
             signal_id=f"signal:{uuid4()}",
             market_id=market.market_id,
             asset=rule.asset,
-            threshold=rule.strike,
+            threshold=threshold,
             deadline=rule.target_time_utc,
             estimated_probability=estimate.base_probability,
             probability_low=estimate.probability_low,
@@ -294,6 +326,9 @@ class MarketWorkflowService:
             reasons=tuple(estimate.reasons) + (("no_positive_net_ev",) if selected is None else ()),
             observed_at=decision_at,
             received_at=decision_at,
+            contract_family=rule.contract_family,
+            affirmative_outcome=rule.affirmative_outcome,
+            negative_outcome=rule.negative_outcome,
         )
         self.repository.save_analysis_signal(
             signal,
@@ -500,6 +535,129 @@ class MarketWorkflowService:
             reasons.append(f"coinbase_input_error:{type(exc).__name__}")
             return None
 
+    def _chainlink_inputs(
+        self,
+        market_id: str,
+        rule: CryptoResolutionRule,
+        reasons: list[str],
+        audit: _AnalysisAudit,
+    ) -> tuple[PriceSnapshot | None, Decimal, Decimal | None]:
+        stream = self.chainlink_stream
+        pair = rule.pair
+        window_start = rule.window_start_time_utc
+        if stream is None:
+            reasons.append("chainlink_reference_stream_disabled")
+            return None, Decimal("0"), None
+        if not pair or window_start is None:
+            reasons.append("missing_chainlink_contract_boundary")
+            return None, Decimal("0"), None
+
+        decision_at = _utc(self.clock())
+        start_tick = stream.boundary_tick(
+            pair,
+            window_start,
+            tolerance_seconds=self.settings.CHAINLINK_BOUNDARY_TOLERANCE_SECONDS,
+        )
+        if start_tick is None:
+            reasons.append("missing_chainlink_window_start_tick")
+            return None, Decimal("0"), None
+        if not start_tick.fresh or start_tick.received_at > decision_at:
+            reasons.append("stale_chainlink_window_start_tick")
+        current_tick = stream.latest_tick(
+            pair,
+            at=decision_at,
+            max_age_seconds=self.settings.CHAINLINK_REFERENCE_STREAM_STALE_SECONDS,
+        )
+        if current_tick is None:
+            reasons.append("stale_or_missing_chainlink_current_tick")
+            return None, start_tick.price, None
+        if start_tick.pair != pair or current_tick.pair != pair:
+            reasons.append("chainlink_pair_mismatch")
+        if start_tick.provider != "chainlink" or current_tick.provider != "chainlink":
+            reasons.append("chainlink_provider_mismatch")
+
+        history_start = decision_at - timedelta(
+            seconds=self.settings.CHAINLINK_VOLATILITY_WINDOW_SECONDS
+        )
+        raw_history = tuple(
+            tick
+            for tick in stream.history(pair, start=history_start, end=decision_at)
+            if tick.fresh
+            and tick.provider == "chainlink"
+            and tick.pair == pair
+            and tick.candle_interval == "tick"
+            and tick.price_field == "value"
+            and tick.received_at <= decision_at
+        )
+        history = _downsample_ticks(
+            raw_history,
+            sample_seconds=self.settings.CHAINLINK_VOLATILITY_SAMPLE_SECONDS,
+        )
+        volatility = annualized_tick_volatility(
+            tuple((tick.provider_timestamp, tick.price) for tick in history),
+            sample_seconds=self.settings.CHAINLINK_VOLATILITY_SAMPLE_SECONDS,
+        )
+        if volatility is None:
+            reasons.append("insufficient_chainlink_volatility_history")
+
+        start_payload = _reference_tick_payload(start_tick)
+        start_payload["boundary_time"] = window_start.isoformat()
+        start_payload["tolerance_seconds"] = (
+            self.settings.CHAINLINK_BOUNDARY_TOLERANCE_SECONDS
+        )
+        current_payload = _reference_tick_payload(current_tick)
+        history_payload = {
+            "window_seconds": self.settings.CHAINLINK_VOLATILITY_WINDOW_SECONDS,
+            "sample_seconds": self.settings.CHAINLINK_VOLATILITY_SAMPLE_SECONDS,
+            "annualized_volatility": str(volatility) if volatility is not None else None,
+            "model_input_version": "chainlink-tick-volatility-v1",
+            "ticks": [_reference_tick_payload(tick) for tick in history],
+        }
+        self._record(
+            audit,
+            market_id,
+            "chainlink",
+            "chainlink_start_price",
+            start_payload,
+            start_tick.provider_timestamp,
+            start_tick.received_at,
+            start_tick.source_version,
+        )
+        self._record(
+            audit,
+            market_id,
+            "chainlink",
+            "chainlink_current_price",
+            current_payload,
+            current_tick.provider_timestamp,
+            current_tick.received_at,
+            current_tick.source_version,
+        )
+        self._record(
+            audit,
+            market_id,
+            "chainlink",
+            "chainlink_volatility_window",
+            history_payload,
+            history[-1].provider_timestamp if history else None,
+            max((tick.received_at for tick in history), default=decision_at),
+            current_tick.source_version,
+        )
+
+        start_snapshot = _chainlink_snapshot(
+            rule,
+            start_tick,
+            price_kind="window_start_value",
+        )
+        current_snapshot = _chainlink_snapshot(
+            rule,
+            current_tick,
+            price_kind="data_stream_value",
+        )
+        self.repository.save_price_snapshot(start_snapshot, market_id=market_id)
+        self.repository.save_price_snapshot(current_snapshot, market_id=market_id)
+        return current_snapshot, start_tick.price, volatility
+
     def _save_rejected(
         self,
         market_id: str,
@@ -514,13 +672,15 @@ class MarketWorkflowService:
         yes_execution: AskExecution | None = None,
         no_execution: AskExecution | None = None,
         fee_schedule: MarketFeeSchedule | None = None,
+        threshold: Decimal | None = None,
         audit: _AnalysisAudit,
     ) -> AnalysisSignal:
+        effective_threshold = threshold if threshold and threshold > 0 else rule.strike
         signal = AnalysisSignal(
             signal_id=f"signal:{uuid4()}",
             market_id=market_id,
             asset=rule.asset,
-            threshold=rule.strike if rule.strike > 0 else None,
+            threshold=effective_threshold if effective_threshold > 0 else None,
             deadline=rule.target_time_utc,
             estimated_probability=estimate.base_probability if estimate else None,
             probability_low=estimate.probability_low if estimate else None,
@@ -548,6 +708,9 @@ class MarketWorkflowService:
             reasons=tuple(dict.fromkeys(reasons)),
             observed_at=now,
             received_at=now,
+            contract_family=rule.contract_family,
+            affirmative_outcome=rule.affirmative_outcome,
+            negative_outcome=rule.negative_outcome,
         )
         self.repository.save_analysis_signal(
             signal,
@@ -598,6 +761,55 @@ def _execution_fee_per_share(
         fee_rate=fee_rate,
     )
     return total / execution.shares
+
+
+def _chainlink_snapshot(
+    rule: CryptoResolutionRule,
+    tick: ReferencePriceTick,
+    *,
+    price_kind: str,
+) -> PriceSnapshot:
+    return PriceSnapshot(
+        asset=rule.asset,
+        quote="USD",
+        provider=tick.provider,
+        symbol=tick.pair,
+        price=tick.price,
+        price_kind=price_kind,
+        observed_at=_utc(tick.provider_timestamp),
+        received_at=_utc(tick.received_at),
+        source_version=tick.source_version,
+        raw_payload=tick.raw_payload,
+    )
+
+
+def _reference_tick_payload(tick: ReferencePriceTick) -> dict[str, object]:
+    return {
+        "provider": tick.provider,
+        "pair": tick.pair,
+        "candle_interval": tick.candle_interval,
+        "price_field": tick.price_field,
+        "price": str(tick.price),
+        "provider_timestamp": _utc(tick.provider_timestamp).isoformat(),
+        "received_at": _utc(tick.received_at).isoformat(),
+        "fresh": tick.fresh,
+        "sequence": tick.sequence,
+        "payload_hash": tick.payload_hash,
+        "source_version": tick.source_version,
+        "raw_payload": tick.raw_payload,
+    }
+
+
+def _downsample_ticks(
+    ticks: tuple[ReferencePriceTick, ...],
+    *,
+    sample_seconds: int,
+) -> tuple[ReferencePriceTick, ...]:
+    buckets: dict[int, ReferencePriceTick] = {}
+    for tick in sorted(ticks, key=lambda item: item.provider_timestamp):
+        bucket = int(tick.provider_timestamp.timestamp()) // sample_seconds
+        buckets[bucket] = tick
+    return tuple(tick for _, tick in sorted(buckets.items()))
 
 
 def _utc(value: datetime) -> datetime:

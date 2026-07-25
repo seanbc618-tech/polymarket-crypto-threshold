@@ -6,26 +6,36 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 import httpx
+import pytest
 
 from crypto_threshold.adapters.prices.coinbase import CoinbaseProvider
 
 NOW = datetime(2026, 7, 22, 12, 0, tzinfo=UTC)
 
 
-def test_coinbase_snapshot_is_usd_sanity_only() -> None:
+@pytest.mark.parametrize(
+    ("asset", "symbol"),
+    [
+        ("BTC", "BTC-USD"),
+        ("ETH", "ETH-USD"),
+        ("SOL", "SOL-USD"),
+        ("XRP", "XRP-USD"),
+    ],
+)
+def test_coinbase_snapshot_is_usd_sanity_only(asset: str, symbol: str) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
-        assert request.url.path.endswith("/prices/BTC-USD/spot")
+        assert request.url.path.endswith(f"/prices/{symbol}/spot")
         return httpx.Response(
             200,
-            json={"data": {"base": "BTC", "currency": "USD", "amount": "104999"}},
+            json={"data": {"base": asset, "currency": "USD", "amount": "104999"}},
         )
 
     client = httpx.Client(transport=httpx.MockTransport(handler))
-    snapshot = CoinbaseProvider(client=client, clock=lambda: NOW).get_spot_price("BTC")
+    snapshot = CoinbaseProvider(client=client, clock=lambda: NOW).get_spot_price(asset)
     assert snapshot.price == Decimal("104999")
     assert (snapshot.provider, snapshot.symbol, snapshot.quote) == (
         "coinbase",
-        "BTC-USD",
+        symbol,
         "USD",
     )
 
@@ -35,9 +45,9 @@ def test_unsupported_asset_raises_before_network() -> None:
         client=httpx.Client(transport=httpx.MockTransport(lambda _: None))
     )
     try:
-        provider.get_spot_price("SOL")
+        provider.get_spot_price("DOGE")
     except ValueError as exc:
-        assert "SOL" in str(exc)
+        assert "DOGE" in str(exc)
     else:
         raise AssertionError("unsupported asset did not raise")
 

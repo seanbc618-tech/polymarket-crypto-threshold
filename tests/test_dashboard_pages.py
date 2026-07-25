@@ -28,7 +28,7 @@ def test_all_dashboard_routes_render_crypto_research_truth(tmp_path: Path) -> No
 
     expected = {
         "/?lang=en": ("Live status: NO-GO", "Bitcoin above"),
-        "/markets?lang=en": ("BTC / ETH threshold markets", "100000"),
+        "/markets?lang=en": ("BTC / ETH / SOL / XRP threshold markets", "100000"),
         "/markets/m1?lang=en": ("Latest executable analysis", "YES / NO order-book"),
         "/calibration?lang=en": ("Replay datasets", "Brier"),
         "/paper?lang=en": ("Paper ledger", "1.25"),

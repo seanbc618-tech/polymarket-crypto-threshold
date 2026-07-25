@@ -15,9 +15,19 @@ from decimal import Decimal
 from typing import Any, Protocol
 from urllib.parse import urlsplit
 
+from crypto_threshold.domain.assets import (
+    ASSET_CONTRACTS,
+    DAILY_THRESHOLD_ASSETS,
+    SUPPORTED_BINANCE_SYMBOLS,
+)
+
 BINANCE_STREAM_SOURCE_VERSION = "binance-spot-sdk-stream-v1"
 BINANCE_STREAM_URL = "wss://stream.binance.com:443"
-DEFAULT_PAIRS = ("BTCUSDT", "ETHUSDT")
+DEFAULT_PAIRS = tuple(
+    str(ASSET_CONTRACTS[asset].binance_symbol)
+    for asset in sorted(DAILY_THRESHOLD_ASSETS)
+    if ASSET_CONTRACTS[asset].binance_symbol is not None
+)
 
 
 @dataclass(frozen=True)
@@ -33,6 +43,7 @@ class ReferencePriceTick:
     source_version: str = BINANCE_STREAM_SOURCE_VERSION
     sequence: str | None = None
     payload_hash: str | None = None
+    raw_payload: Any = None
 
 
 class ReferencePriceStream(Protocol):
@@ -282,13 +293,13 @@ def normalize_binance_kline(
     received_at: datetime,
     max_age_seconds: float = 45.0,
 ) -> ReferencePriceTick | None:
-    """Normalize only closed UTC 1m Close events from BTC/ETH USDT."""
+    """Normalize closed UTC 1m Close events for supported USDT pairs."""
     payload = _mapping(event)
     kline = _mapping(payload.get("k"))
     if not kline or kline.get("x") is not True:
         return None
     pair = str(payload.get("s") or kline.get("s") or "").upper()
-    if pair not in DEFAULT_PAIRS or str(kline.get("i") or "") != "1m":
+    if pair not in SUPPORTED_BINANCE_SYMBOLS or str(kline.get("i") or "") != "1m":
         return None
     close = kline.get("c")
     close_time = kline.get("T")
@@ -311,6 +322,7 @@ def normalize_binance_kline(
         fresh=-5 <= age <= max_age_seconds,
         sequence=sequence or None,
         payload_hash=hashlib.sha256(normalized.encode("utf-8")).hexdigest(),
+        raw_payload=payload,
     )
 
 

@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 import httpx
+import pytest
 
 from crypto_threshold.adapters.polymarket.client import GammaClobReadClient
 from crypto_threshold.config import Settings
@@ -34,6 +37,28 @@ def test_discovery_queries_both_threshold_directions() -> None:
     assert all(request.url.params["events_status"] == "active" for request in requests)
     assert all(request.url.params["keep_closed_markets"] == "0" for request in requests)
     assert all(request.method == "GET" for request in requests)
+
+
+@pytest.mark.parametrize(
+    ("asset", "name"),
+    [("SOL", "Solana"), ("XRP", "XRP")],
+)
+def test_discovery_supports_each_additional_daily_asset(
+    asset: str,
+    name: str,
+) -> None:
+    queries: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        queries.append(str(request.url.params["q"]))
+        return httpx.Response(200, json={"events": []})
+
+    client = GammaClobReadClient(
+        Settings(_env_file=None),
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    assert client.discover_markets(asset, 4) == []
+    assert set(queries) == {f"{name} above", f"{name} below"}
 
 
 def test_market_book_and_fee_calls_are_get_only() -> None:
@@ -84,3 +109,50 @@ def test_clob_server_time_health_read() -> None:
     settings = Settings(_env_file=None)
     client = GammaClobReadClient(settings, client=httpx.Client(transport=transport))
     assert client.get_server_time() == 1784700000
+
+
+def test_updown_discovery_uses_exact_tags_and_returns_all_fourteen() -> None:
+    requests: list[httpx.Request] = []
+    start = datetime(2026, 7, 25, 12, 0, tzinfo=UTC)
+    end = start + timedelta(minutes=16)
+    assets = ("btc", "eth", "sol", "xrp", "doge", "bnb", "hype")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        interval = str(request.url.params["tag_slug"]).lower()
+        events = []
+        for asset in assets:
+            slug = f"{asset}-up-or-down-{interval}"
+            events.append(
+                {
+                    "id": f"event-{asset}-{interval}",
+                    "seriesSlug": slug,
+                    "recurrence": "daily",
+                    "series": [{"slug": slug, "recurrence": "daily"}],
+                    "markets": [
+                        {
+                            "id": f"market-{asset}-{interval}",
+                            "conditionId": f"condition-{asset}-{interval}",
+                            "question": f"{asset} Up or Down?",
+                        }
+                    ],
+                }
+            )
+        return httpx.Response(200, json=events)
+
+    client = GammaClobReadClient(
+        Settings(_env_file=None),
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    markets = client.discover_updown_markets(
+        ("5m", "15m"),
+        start=start,
+        end=end,
+        limit=14,
+    )
+
+    assert len(markets) == 14
+    assert {request.url.params["tag_slug"] for request in requests} == {"5M", "15M"}
+    assert all(request.method == "GET" for request in requests)
+    assert all(request.url.path == "/events" for request in requests)
+    assert all("events" in market for market in markets)

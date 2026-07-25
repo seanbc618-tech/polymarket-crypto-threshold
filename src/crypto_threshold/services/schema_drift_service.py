@@ -202,6 +202,57 @@ def _coinbase_spot(payload: Any) -> list[str]:
     return [f"missing_data_{key}" for key in missing]
 
 
+def _chainlink_tick(payload: Any) -> list[str]:
+    if not isinstance(payload, dict):
+        return ["root_not_object"]
+    required = {
+        "provider",
+        "pair",
+        "candle_interval",
+        "price_field",
+        "price",
+        "provider_timestamp",
+        "received_at",
+        "source_version",
+    }
+    return [
+        f"missing_{key}"
+        for key in sorted(required)
+        if not _nonempty(payload.get(key))
+    ]
+
+
+def _chainlink_tick_window(payload: Any) -> list[str]:
+    if not isinstance(payload, dict):
+        return ["root_not_object"]
+    if not isinstance(payload.get("window_seconds"), int):
+        return ["window_seconds_not_integer"]
+    if not isinstance(payload.get("sample_seconds"), int):
+        return ["sample_seconds_not_integer"]
+    ticks = payload.get("ticks")
+    if not isinstance(ticks, list):
+        return ["ticks_not_list"]
+    if not ticks:
+        return ["empty_tick_window"]
+    issues: list[str] = []
+    for tick in ticks:
+        issues.extend(_chainlink_tick(tick))
+        if issues:
+            break
+    return issues
+
+
+def _gamma_resolution_event(payload: Any) -> list[str]:
+    if not isinstance(payload, dict):
+        return ["root_not_object"]
+    issues: list[str] = []
+    if not _nonempty(payload.get("id")):
+        issues.append("missing_event_identifier")
+    if not isinstance(payload.get("markets"), list):
+        issues.append("markets_not_list")
+    return issues
+
+
 def _optional_listish(payload: dict[str, Any], key: str) -> list[str]:
     if key not in payload:
         return []
@@ -226,9 +277,15 @@ _VALIDATORS: dict[tuple[str, str], Callable[[Any], list[str]]] = {
     ("gamma", "event_context"): _gamma_event_context,
     ("polymarket_clob", "yes_book"): _clob_book,
     ("polymarket_clob", "no_book"): _clob_book,
+    ("polymarket_clob", "up_book"): _clob_book,
+    ("polymarket_clob", "down_book"): _clob_book,
     ("polymarket_clob", "market_info_fee_schedule"): _fee_schedule,
     ("binance", "settlement_klines_1m"): _binance_klines,
     ("binance", "volatility_klines_1d"): _binance_klines,
     ("binance", "settlement_candle_1m_close"): _binance_klines,
     ("coinbase", "sanity_spot"): _coinbase_spot,
+    ("chainlink", "chainlink_start_price"): _chainlink_tick,
+    ("chainlink", "chainlink_current_price"): _chainlink_tick,
+    ("chainlink", "chainlink_volatility_window"): _chainlink_tick_window,
+    ("gamma", "chainlink_resolution_event"): _gamma_resolution_event,
 }

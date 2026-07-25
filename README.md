@@ -1,7 +1,7 @@
 # Polymarket Crypto Threshold Research
 
-Auditable, read-only analysis for a narrow class of Polymarket BTC/ETH price
-threshold markets.
+Auditable, read-only analysis for explicitly supported Polymarket crypto price
+contracts.
 
 ## Status
 
@@ -12,10 +12,11 @@ calibration, and a paper ledger. It does not contain order signing, BUY/SELL
 placement, cancellation, or position mutation. `TRADING_DISABLED` must remain
 `true`.
 
-Phase 1 supports only contracts whose binding text provides all of these facts:
+The daily-threshold family supports only contracts whose binding text provides
+all of these facts:
 
-- BTC or ETH
-- Binance `BTC/USDT` or `ETH/USDT`
+- BTC, ETH, SOL, or XRP
+- the matching Binance USDT pair
 - one-minute candle `Close`
 - a terminal daily threshold with an exact `>` or `<` boundary
 - noon in `America/New_York`, converted with DST rules
@@ -24,6 +25,14 @@ Phase 1 supports only contracts whose binding text provides all of these facts:
 Anything missing, expired, path-dependent, or semantically mismatched is saved
 for preview and rejected from analysis.
 
+The separate short-Up/Down family supports current 5-minute and 15-minute
+markets for BTC, ETH, SOL, XRP, DOGE, BNB, and HYPE. These contracts settle on
+the matching Chainlink USD Data Stream. `Up` means the end value is greater
+than or equal to the beginning value; equality belongs to `Up`. The official
+public SDK stream must capture the exact start boundary. A process that starts
+mid-window rejects that window rather than substituting Binance or a later
+Chainlink tick.
+
 ## Workflow
 
 ```text
@@ -31,8 +40,8 @@ Gamma discovery
   -> raw payload + canonical market
   -> authoritative contract parser
   -> YES/NO CLOB books + per-market fee schedule
-  -> Binance settlement-aligned close + historical klines
-  -> Coinbase sanity check
+  -> family-authoritative Binance or Chainlink reference inputs
+  -> Coinbase sanity check for daily thresholds only
   -> target-size ask VWAP + fee/spread/slippage net EV
   -> persisted signal or persisted rejection reasons
 ```
@@ -42,10 +51,15 @@ change hints. It is disabled by default and shadow/read-only when enabled. Its
 BBO never replaces REST depth: every net-EV analysis still fetches fresh YES
 and NO CLOB order books before calculating ask VWAP, fees, or slippage.
 
-Phase 2 adds immutable exact-input replay manifests, Binance settlement labels,
+Phase 2 adds immutable exact-input replay manifests, authoritative settlement labels,
 leakage-safe walk-forward calibration, a persistent paper ledger, and optional
 Polymarket/Binance stream hints. Streams select work only; every model input and
 executable VWAP is refreshed and persisted through REST.
+
+For short Up/Down research, the Chainlink SDK stream supplies only normalized,
+bounded in-memory reference ticks. Gamma's final public Chainlink metadata and
+resolved outcome are required for immutable labels. Daily and short replay
+datasets are family-specific and cannot be mixed.
 
 The production ownership path is:
 
@@ -64,6 +78,7 @@ uv run crypto-threshold markets
 uv run crypto-threshold analyze --market <gamma_market_id>
 uv run crypto-threshold settle
 uv run crypto-threshold replay-build --name <dataset_name>
+uv run crypto-threshold replay-build --name <short_dataset> --family short_updown
 uv run crypto-threshold replay-verify --dataset <dataset_name>
 uv run crypto-threshold calibrate --dataset <dataset_name>
 ```
@@ -92,6 +107,18 @@ the existing `shadow_cycles.stream_health_json`; no second evidence table is
 created. Shadow refuses to start when a private key is present in the process
 environment or ordinary configuration.
 
+The short family is opt-in and additionally requires:
+
+```bash
+SHADOW_ENABLED=true \
+SHADOW_CONTRACT_FAMILY=short_updown \
+CHAINLINK_REFERENCE_STREAM_ENABLED=true \
+uv run crypto-threshold shadow
+```
+
+It uses the same canonical workflow and repository but should run in a separate
+database from the daily Phase 2 acceptance window.
+
 The local Mainland China development network requires an outbound proxy for
 networked provider checks and shadow monitoring. Configure
 `BINANCE_STREAM_PROXY_URL=http://127.0.0.1:12334` in addition to the local HTTP
@@ -119,7 +146,7 @@ uv run crypto-threshold dashboard
 
 Open `http://127.0.0.1:8765`. The server renders:
 
-- BTC/ETH contracts with strike, settlement time, YES/NO books, ask VWAP, and net EV
+- supported contracts with boundary, settlement, outcome books, ask VWAP, and net EV
 - exact market evidence and rejection reasons
 - replay/calibration results
 - shadow-cycle evidence

@@ -39,8 +39,9 @@ class Repository:
                     active, closed, accepting_orders, enable_order_book,
                     end_date, gamma_end_date, outcomes, tokens, yes_token_id,
                     no_token_id, raw_payload, raw_observed_at, raw_received_at,
-                    source_version, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    source_version, event_start_time, series_slug, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                          ?, ?)
                 ON CONFLICT(market_id) DO UPDATE SET
                     event_id=excluded.event_id,
                     condition_id=excluded.condition_id,
@@ -61,6 +62,8 @@ class Repository:
                     raw_observed_at=excluded.raw_observed_at,
                     raw_received_at=excluded.raw_received_at,
                     source_version=excluded.source_version,
+                    event_start_time=excluded.event_start_time,
+                    series_slug=excluded.series_slug,
                     updated_at=excluded.updated_at
                 """,
                 (
@@ -86,6 +89,8 @@ class Repository:
                     _iso(market.gamma_end_date),
                     _iso(market.received_at),
                     "gamma-markets-v1",
+                    _iso(market.event_start_time),
+                    market.series_slug,
                     _iso(market.received_at),
                 ),
             )
@@ -144,9 +149,11 @@ class Repository:
                     threshold, strike, candle_interval, price_field, timezone,
                     observation_time, target_time_utc, gamma_end_date, rule_confidence,
                     tradable, preview_only, rejection_reason, raw_text, raw_description,
-                    parser_version, observed_at, received_at, source_version, updated_at
+                    parser_version, observed_at, received_at, source_version, updated_at,
+                    contract_family, boundary_type, window_start_time_utc,
+                    affirmative_outcome, negative_outcome, series_slug
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                          ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                          ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(rule_id) DO UPDATE SET
                     event_id=excluded.event_id,
                     condition_id=excluded.condition_id,
@@ -176,6 +183,12 @@ class Repository:
                     observed_at=excluded.observed_at,
                     received_at=excluded.received_at,
                     source_version=excluded.source_version,
+                    contract_family=excluded.contract_family,
+                    boundary_type=excluded.boundary_type,
+                    window_start_time_utc=excluded.window_start_time_utc,
+                    affirmative_outcome=excluded.affirmative_outcome,
+                    negative_outcome=excluded.negative_outcome,
+                    series_slug=excluded.series_slug,
                     updated_at=excluded.updated_at
                 """,
                 (
@@ -208,8 +221,14 @@ class Repository:
                     rule.parser_version,
                     _iso(observed_at),
                     _iso(received_at),
-                    "contract-parser-v2",
+                    "contract-parser-v3",
                     _iso(received_at),
+                    rule.contract_family,
+                    rule.boundary_type,
+                    _iso(rule.window_start_time_utc),
+                    rule.affirmative_outcome,
+                    rule.negative_outcome,
+                    rule.series_slug,
                 ),
             )
 
@@ -360,9 +379,10 @@ class Repository:
                     no_spread_cost, yes_slippage_cost, no_slippage_cost,
                     yes_net_ev, no_net_ev, selected_outcome, net_ev, status,
                     model_name, model_version, confidence, reasons,
-                    input_payload_max_id, observed_at, received_at, source_version
+                    input_payload_max_id, observed_at, received_at, source_version,
+                    contract_family, affirmative_outcome, negative_outcome
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                          ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                          ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     signal.signal_id,
@@ -401,6 +421,9 @@ class Repository:
                     _iso(signal.observed_at),
                     _iso(signal.received_at),
                     signal.source_version,
+                    signal.contract_family,
+                    signal.affirmative_outcome,
+                    signal.negative_outcome,
                 ),
             )
             connection.executemany(
@@ -423,8 +446,8 @@ class Repository:
                     label_id, market_id, target_time_utc, provider, pair,
                     candle_interval, price_field, exact_operator, strike,
                     observed_value, outcome_yes, payload_id, observed_at,
-                    received_at, source_version
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    received_at, source_version, contract_family
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(market_id, target_time_utc, source_version) DO NOTHING
                 """,
                 (
@@ -443,6 +466,7 @@ class Repository:
                     _iso(label.observed_at),
                     _iso(label.received_at),
                     label.source_version,
+                    label.contract_family,
                 ),
             )
             row = connection.execute(
@@ -457,19 +481,61 @@ class Repository:
         return _settlement_label(row)
 
     def settlement_candidates(self, *, ready_before: datetime, limit: int) -> list[Row]:
-        """Return supported rules whose final candle should now be closed."""
+        """Return supported rules whose final candle should now be closed.
+
+        A rule can become preview-only after its deadline. Preserve settlement
+        eligibility when an analyzed, pre-deadline decision proves that the
+        contract was supported while it was live.
+        """
         with closing(self.database.connect()) as connection:
             return list(
                 connection.execute(
                     """
-                    SELECT m.market_id, r.*
+                    SELECT
+                        m.market_id,
+                        r.*,
+                        CASE WHEN EXISTS (
+                            SELECT 1
+                            FROM analysis_signals AS s
+                            WHERE s.market_id = m.market_id
+                              AND s.status = 'analyzed'
+                              AND s.observed_at < r.target_time_utc
+                              AND s.asset = r.asset
+                              AND s.contract_family = r.contract_family
+                              AND (
+                                  (r.contract_family = 'daily_threshold'
+                                   AND s.threshold = r.strike)
+                                  OR
+                                  (r.contract_family = 'short_updown'
+                                   AND CAST(s.threshold AS REAL) > 0)
+                              )
+                              AND s.deadline = r.target_time_utc
+                        ) THEN 1 ELSE 0 END AS had_analyzed_predeadline_signal
                     FROM markets AS m
                     JOIN resolution_rules AS r ON r.market_id = m.market_id
                     LEFT JOIN settlement_labels AS l
                       ON l.market_id = m.market_id
                      AND l.target_time_utc = r.target_time_utc
-                     AND l.source_version = 'binance-settlement-v1'
-                    WHERE r.tradable = 1
+                    WHERE (
+                        r.tradable = 1
+                        OR EXISTS (
+                            SELECT 1
+                            FROM analysis_signals AS s
+                            WHERE s.market_id = m.market_id
+                              AND s.status = 'analyzed'
+                              AND s.observed_at < r.target_time_utc
+                              AND s.asset = r.asset
+                              AND s.contract_family = r.contract_family
+                              AND (
+                                  (r.contract_family = 'daily_threshold'
+                                   AND s.threshold = r.strike)
+                                  OR
+                                  (r.contract_family = 'short_updown'
+                                   AND CAST(s.threshold AS REAL) > 0)
+                              )
+                              AND s.deadline = r.target_time_utc
+                        )
+                      )
                       AND r.target_time_utc IS NOT NULL
                       AND r.target_time_utc <= ?
                       AND l.label_id IS NULL
@@ -490,22 +556,29 @@ class Repository:
                 (market_id,),
             ).fetchone()
 
-    def replay_candidate_rows(self) -> list[Row]:
+    def replay_candidate_rows(self, *, contract_family: str) -> list[Row]:
         """Return labeled analyzed signals in decision-time order."""
         with closing(self.database.connect()) as connection:
             return list(
                 connection.execute(
                     """
-                    SELECT s.*, l.label_id, l.outcome_yes, l.received_at AS label_received_at,
+                    SELECT s.*, l.label_id, l.outcome_yes,
+                           l.strike AS label_strike,
+                           l.received_at AS label_received_at,
                            l.target_time_utc AS label_target_time_utc
                     FROM analysis_signals AS s
-                    JOIN settlement_labels AS l ON l.market_id = s.market_id
+                    JOIN settlement_labels AS l
+                      ON l.market_id = s.market_id
+                     AND l.target_time_utc = s.deadline
+                     AND l.contract_family = s.contract_family
                     WHERE s.status = 'analyzed'
+                      AND s.contract_family = ?
                       AND s.estimated_probability IS NOT NULL
                       AND s.yes_ask_vwap IS NOT NULL
                       AND s.no_ask_vwap IS NOT NULL
                     ORDER BY s.observed_at, s.signal_id
-                    """
+                    """,
+                    (contract_family,),
                 )
             )
 
@@ -755,7 +828,8 @@ class Repository:
                     cycle_id, mode, status, discovered_count, analyzed_count,
                     paper_entered_count, paper_skipped_count, stream_health_json,
                     reasons, source_version, started_at, completed_at
-                ) VALUES (?, 'shadow', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    , contract_family
+                ) VALUES (?, 'shadow', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     cycle.cycle_id,
@@ -769,6 +843,7 @@ class Repository:
                     cycle.source_version,
                     _iso(cycle.started_at),
                     _iso(cycle.completed_at),
+                    cycle.contract_family,
                 ),
             )
 
@@ -1247,4 +1322,9 @@ def _settlement_label(row: Row) -> SettlementLabel:
         observed_at=datetime.fromisoformat(str(row["observed_at"])),
         received_at=datetime.fromisoformat(str(row["received_at"])),
         source_version=str(row["source_version"]),
+        contract_family=(
+            str(row["contract_family"])
+            if "contract_family" in row.keys()
+            else "daily_threshold"
+        ),
     )

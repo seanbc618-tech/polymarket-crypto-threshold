@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily Crypto Up/Down SQLite evidence backup
+
+[Timer]
+OnCalendar=*-*-* 04:00:00
+Persistent=true
+Unit=crypto-threshold-updown-backup.service
+
+[Install]
+WantedBy=timers.target

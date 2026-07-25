@@ -25,6 +25,7 @@ class SettlementLabel:
     observed_at: datetime
     received_at: datetime
     source_version: str = "binance-settlement-v1"
+    contract_family: str = "daily_threshold"
 
 
 @dataclass(frozen=True)
@@ -91,3 +92,4 @@ class ShadowCycleResult:
     started_at: datetime
     completed_at: datetime
     source_version: str = "shadow-monitor-v1"
+    contract_family: str = "daily_threshold"

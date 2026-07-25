@@ -6,19 +6,29 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 import httpx
+import pytest
 
 from crypto_threshold.adapters.prices.binance import BinanceProvider
 
 NOW = datetime(2026, 7, 22, 12, 0, tzinfo=UTC)
 
 
-def test_ticker_uses_supported_usdt_symbol() -> None:
+@pytest.mark.parametrize(
+    ("asset", "symbol"),
+    [
+        ("BTC", "BTCUSDT"),
+        ("ETH", "ETHUSDT"),
+        ("SOL", "SOLUSDT"),
+        ("XRP", "XRPUSDT"),
+    ],
+)
+def test_ticker_uses_supported_usdt_symbol(asset: str, symbol: str) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
-        assert request.url.params["symbol"] == "BTCUSDT"
-        return httpx.Response(200, json={"symbol": "BTCUSDT", "price": "105000.50"})
+        assert request.url.params["symbol"] == symbol
+        return httpx.Response(200, json={"symbol": symbol, "price": "105000.50"})
 
     client = httpx.Client(transport=httpx.MockTransport(handler))
-    snapshot = BinanceProvider(client=client, clock=lambda: NOW).get_ticker_price("BTC")
+    snapshot = BinanceProvider(client=client, clock=lambda: NOW).get_ticker_price(asset)
     assert snapshot.price == Decimal("105000.50")
     assert (snapshot.quote, snapshot.provider, snapshot.price_kind) == (
         "USDT",
@@ -52,9 +62,9 @@ def test_latest_snapshot_uses_only_closed_one_minute_candle() -> None:
 def test_unsupported_asset_raises_before_network() -> None:
     provider = BinanceProvider(client=httpx.Client(transport=httpx.MockTransport(lambda _: None)))
     try:
-        provider.get_ticker_price("SOL")
+        provider.get_ticker_price("DOGE")
     except ValueError as exc:
-        assert "SOL" in str(exc)
+        assert "DOGE" in str(exc)
     else:
         raise AssertionError("unsupported asset did not raise")
 

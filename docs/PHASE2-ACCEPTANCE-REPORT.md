@@ -39,7 +39,7 @@ Exit codes:
 
 | Check | Pass criterion (all evidence must already exist) |
 |---|---|
-| `schema_integrity` | `schema_meta.version == 3`, foreign keys ON, no FK violations, WAL journal, required research tables present |
+| `schema_integrity` | `schema_meta.version == 4`, foreign keys ON, no FK violations, WAL journal, required research tables present |
 | `no_trading_mutation_surface` | No orders/fills/positions/signer/authenticated-reconciliation mutation tables |
 | `replay_dataset` | At least one **sealed**, **non-empty** replay dataset that **verifies at 100%** |
 | `chronological_train_and_oos` | One complete run references a verified sealed dataset; actual replay rows provide ≥30 labels available before an OOS decision, and stored sample/evaluation counts equal recomputed counts |

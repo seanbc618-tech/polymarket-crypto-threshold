@@ -36,7 +36,7 @@ env \
 
 Do not start the continuous run unless the cycle persists:
 
-- schema v3 with no forbidden trading tables
+- current schema v4 with no forbidden trading tables
 - raw external payloads
 - analysis signals and structured rejection reasons
 - paper-ledger enter/skip decisions

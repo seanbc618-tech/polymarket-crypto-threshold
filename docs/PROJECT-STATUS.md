@@ -1,6 +1,6 @@
 # Project Status
 
-**Date:** 2026-07-24
+**Date:** 2026-07-25
 
 **Classification:** Research prototype
 
@@ -22,6 +22,14 @@ Binance WebSocket access; the proxied stream produced valid BTCUSDT and ETHUSDT
 running the formal Phase 2 shadow window against a fresh evidence database.
 Reconnect evidence and unique-label out-of-sample calibration remain pending.
 These are evidence gaps, not successes.
+
+A separate read-only research expansion now supports the currently observed
+5-minute and 15-minute Polymarket Up/Down contract family for BTC, ETH, SOL,
+XRP, DOGE, BNB, and HYPE. These are Chainlink USD Data Stream contracts, not
+Binance daily thresholds. They use the same canonical discovery, workflow, and
+repository ownership path, but run with a separate configuration, evidence
+database, replay family, and VPS systemd unit. This expansion is shadow
+research only and does not make Phase 2 accepted.
 
 No order signer, authenticated trading client, BUY/SELL method, cancellation
 path, or position mutation exists in the runtime. Setting
@@ -62,6 +70,27 @@ path, or position mutation exists in the runtime. Setting
 - Binance settlement-aligned one-minute close and historical realized
   volatility; Coinbase is a USD sanity check only.
 - Structured rejection signals for every blocked analysis.
+- A canonical seven-asset registry separates daily-threshold capability from
+  short-Up/Down capability instead of assuming every asset has every contract.
+- Authoritative parsing for 5m/15m `Up`/`Down` markets requires Chainlink,
+  the exact USD pair, exact window start/end, `data_stream_value`, UTC,
+  `Up >= start`, both token IDs, open order-book status, and all identifiers.
+- The official public SDK `CryptoPricesSpec(topic="prices.crypto.chainlink")`
+  supplies bounded/coalesced in-memory ticks for BTC/USD, ETH/USD, SOL/USD,
+  XRP/USD, DOGE/USD, BNB/USD, and HYPE/USD. The stream has an idempotent
+  lifecycle, reconnect generation, freshness checks, bounded per-pair history,
+  and scrubbed health output; it never writes SQLite.
+- Short-window model inputs persist the exact start tick, current tick, and
+  trailing volatility window before the signal. Missing the start boundary is
+  a hard rejection; Binance is never substituted for a Chainlink contract.
+- Short-window net EV still uses token-specific REST books, full ask-depth
+  VWAP, and the per-market fee schedule. Stream BBO is only a reprice hint.
+- Chainlink settlement labels require Gamma's public `priceToBeat`,
+  `finalPrice`, and final Up/Down outcome to agree. Equality resolves to Up.
+  Incomplete resolution metadata remains pending and is retried.
+- Replay manifests are explicitly family-scoped. Daily Binance and short
+  Chainlink labels cannot be mixed, and a signal boundary must match the
+  authoritative settlement boundary before entering replay.
 - Versioned SQLite initialization/migration, foreign keys, WAL, transactions,
   source/model versions, and observed/received timestamps.
 - Fail-closed `doctor` checks for DB, providers, HTTPS URLs, and trading mode.
@@ -129,14 +158,20 @@ path, or position mutation exists in the runtime. Setting
   open orders, fills, positions, authenticated reconciliation, and order
   signing remain explicitly disconnected.
 
-## Supported Contract
+## Supported Contracts
 
-Only BTC/ETH daily terminal thresholds using Binance `BTC/USDT` or `ETH/USDT`,
-the final one-minute `Close` at noon `America/New_York`, and a matching Gamma
-deadline are eligible. Missing fields are preview-only.
+Two contract families are isolated:
 
-Monthly hit/touch, intraday path-dependent, range, `High`/`Low`, other exchange,
-other pair, stale-data, malformed-token, and expired markets are rejected.
+1. `daily_threshold`: BTC, ETH, SOL, or XRP terminal thresholds using the
+   matching Binance USDT pair, final one-minute `Close` at noon
+   `America/New_York`, exact `>`/`<`, and a matching Gamma deadline.
+2. `short_updown`: BTC, ETH, SOL, XRP, DOGE, BNB, or HYPE 5m/15m windows using
+   the matching Chainlink USD Data Stream. The affirmative token is `Up`; the
+   exact boundary is end value `>=` start value.
+
+Missing fields are preview-only. Monthly hit/touch, path-dependent, range,
+`High`/`Low`, source/pair/field mismatch, stale data, malformed tokens, expired
+markets, and short windows whose exact start tick was not captured are rejected.
 
 ## Branch Audit
 
@@ -186,6 +221,27 @@ project review and never authorizes live capital or Phase 3 trading work.
 
 ## Verification Evidence
 
+- Current local gate on 2026-07-25: `212 passed`; Ruff reported no findings;
+  mypy reported no issues in 52 source files; `git diff --check` was clean.
+- The short-Up/Down directed suite covers all 7 assets across both intervals,
+  official public SDK-only imports, normalization, bounded/coalesced history,
+  reconnect, lifecycle, secret-safe health, Gamma tag discovery, Up/Down token
+  mapping, parser mismatches, boundary hard rejection, exact-input persistence,
+  Chainlink tie settlement, family-scoped replay, and one-cycle 14-market
+  orchestration.
+- An isolated direct-connect VPS candidate preflight on 2026-07-25 initialized
+  schema v4, passed `doctor`, returned public CLOB time, and received fresh
+  Chainlink ticks for all seven pairs without a proxy or credentials.
+- Its first isolated shadow cycle discovered exactly 14 currently open markets,
+  analyzed 14 through REST, entered zero paper positions, and safely rejected
+  all 14 because the process began after their exact start boundaries. Thirteen
+  had only `missing_chainlink_window_start_tick`; one also had incomplete books.
+  This was expected fail-closed evidence, not a model result.
+- After the candidate crossed the next common boundary, the isolated database
+  contained 14 real `analyzed` signals: seven 5m and seven 15m, one for every
+  supported asset. Seventy earlier signals remained explicit rejections.
+  Paper entered zero positions. This proves the read-only loop is operational,
+  not that its probabilities are calibrated or profitable.
 - Final local deployment gate on 2026-07-24: `151 passed`; Ruff reported no
   findings; mypy reported no issues in 51 source files; `git diff --check` was
   clean.
@@ -276,6 +332,14 @@ project review and never authorizes live capital or Phase 3 trading work.
 
 - Gamma search is relevance-based and is not a completeness guarantee.
 - Public REST snapshots are not atomic across providers.
+- The Chainlink RTDS start tick must be compared with Gamma's eventual
+  `priceToBeat` over real closed windows. Any mismatch excludes that signal
+  from replay; enough forward evidence has not yet accumulated to characterize
+  this risk.
+- A process started or reconnected after a 5m/15m boundary cannot reconstruct
+  the beginning value from the live stream and rejects that active window.
+- Gamma's 5m/15m discovery metadata can report misleading recurrence values;
+  discovery therefore verifies series slug and exact window duration.
 - Stream Market Channel data is BBO-only acceleration, not L2 executable depth;
   REST remains mandatory for VWAP and final validation.
 - The official `polymarket-client` release is a beta API and can change.
@@ -302,3 +366,12 @@ mechanical acceptance checker after at least 72 persisted hours. Continue
 settling new daily contracts and rebuild replay/calibration when enough unique
 labels exist. Live order placement remains explicitly outside this phase and
 requires a separate design and approval.
+
+In parallel, keep the short-Up/Down evidence in its separate database. Compare
+captured starts with Gamma's eventual `priceToBeat`, settle all seven assets,
+then build and verify a `short_updown` replay before interpreting any paper
+result. Do not merge this evidence into the daily Phase 2 acceptance run.
+
+After the formal daily VPS monitor is stopped, backed up, and reviewed, remind
+the operator that the old local smoke history can be deleted. Do not delete it
+while the formal acceptance window is still active.

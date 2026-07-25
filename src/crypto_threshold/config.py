@@ -7,7 +7,7 @@ from collections.abc import Mapping
 from decimal import Decimal
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import urlsplit
 
 from pydantic import Field, field_validator
@@ -51,6 +51,9 @@ class Settings(BaseSettings):
 
     # Phase 2 remains opt-in. These values control research/paper behavior only.
     SHADOW_ENABLED: bool = False
+    SHADOW_CONTRACT_FAMILY: Literal[
+        "daily_threshold", "short_updown"
+    ] = "daily_threshold"
     SHADOW_INTERVAL_SECONDS: float = Field(default=60.0, gt=0)
     SHADOW_DISCOVERY_LIMIT: int = Field(default=20, ge=1, le=500)
     SHADOW_ANALYSIS_LIMIT: int = Field(default=10, ge=1, le=200)
@@ -58,6 +61,13 @@ class Settings(BaseSettings):
     BINANCE_REFERENCE_STREAM_ENABLED: bool = False
     BINANCE_REFERENCE_STREAM_STALE_SECONDS: float = Field(default=45.0, gt=0)
     BINANCE_REFERENCE_STREAM_MAX_TICK_SLOTS: int = Field(default=16, ge=1)
+    CHAINLINK_REFERENCE_STREAM_ENABLED: bool = False
+    CHAINLINK_REFERENCE_STREAM_STALE_SECONDS: float = Field(default=5.0, gt=0)
+    CHAINLINK_REFERENCE_STREAM_HISTORY_SECONDS: float = Field(default=1_200.0, ge=300)
+    CHAINLINK_REFERENCE_STREAM_MAX_TICKS_PER_PAIR: int = Field(default=2_000, ge=60)
+    CHAINLINK_BOUNDARY_TOLERANCE_SECONDS: float = Field(default=2.0, gt=0, le=10)
+    CHAINLINK_VOLATILITY_WINDOW_SECONDS: int = Field(default=900, ge=60, le=3600)
+    CHAINLINK_VOLATILITY_SAMPLE_SECONDS: int = Field(default=30, ge=1, le=60)
     CALIBRATION_BINS: int = Field(default=10, ge=2, le=100)
     CALIBRATION_MIN_TRAIN_SIZE: int = Field(default=30, ge=1)
 

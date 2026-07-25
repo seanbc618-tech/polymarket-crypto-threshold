@@ -99,3 +99,37 @@ sudo -u crypto-threshold \
 
 An acceptance exit code of `0` is evidence for final review only. It never
 authorizes capital, signing, authenticated reconciliation, or order placement.
+
+## Independent 5m/15m Up/Down Shadow
+
+The short-duration research service is deliberately separate from the formal
+daily Phase 2 window:
+
+- unit: `crypto-threshold-updown-shadow.service`
+- environment: `/etc/polymarket-crypto-updown.env`
+- database: `/opt/polymarket-crypto-threshold/data/updown-shadow.db`
+- backup directory: `/opt/polymarket-crypto-threshold/backups/updown`
+- assets: BTC, ETH, SOL, XRP, DOGE, BNB, and HYPE
+- intervals: 5m and 15m
+- settlement source: Chainlink USD Data Stream
+
+Install and start it without restarting `crypto-threshold-shadow.service`:
+
+```bash
+sudo install -o root -g crypto-threshold -m 0640 \
+  deploy/env/hk-updown-shadow.example.env \
+  /etc/polymarket-crypto-updown.env
+sudo install -o root -g root -m 0644 \
+  deploy/systemd/crypto-threshold-updown-shadow.service \
+  deploy/systemd/crypto-threshold-updown-backup.service \
+  deploy/systemd/crypto-threshold-updown-backup.timer \
+  /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now crypto-threshold-updown-backup.timer
+sudo systemctl enable --now crypto-threshold-updown-shadow.service
+```
+
+This service is public-data, read-only, and unbounded until explicitly stopped.
+Its evidence is exploratory and does not satisfy the daily Phase 2 acceptance
+checker. Starting mid-window must produce boundary-missing rejections until a
+new interval begins; this is expected fail-closed behavior.

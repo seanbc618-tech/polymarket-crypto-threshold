@@ -1,18 +1,33 @@
-"""Read-only settlement labels from the contract-authoritative Binance candle."""
+"""Read-only settlement labels from each contract's authoritative source."""
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from sqlite3 import Row
+from typing import Any
 from uuid import uuid4
 
+from crypto_threshold.adapters.polymarket.base import PolymarketReadClient
 from crypto_threshold.adapters.prices.binance import BinanceProvider
+from crypto_threshold.domain.assets import SUPPORTED_ASSETS, asset_contract
 from crypto_threshold.domain.research import SettlementLabel
+from crypto_threshold.domain.rules import (
+    DAILY_THRESHOLD_FAMILY,
+    SHORT_UPDOWN_FAMILY,
+    threshold_satisfied,
+)
 from crypto_threshold.storage.repositories import Repository
 
 SETTLEMENT_SOURCE_VERSION = "binance-settlement-v1"
+CHAINLINK_SETTLEMENT_SOURCE_VERSION = "chainlink-gamma-settlement-v1"
+GAMMA_EVENT_SOURCE_VERSION = "gamma-event-v1"
+
+
+class SettlementPendingError(ValueError):
+    """The authoritative public resolution payload is not complete yet."""
 
 
 class SettlementService:
@@ -23,10 +38,12 @@ class SettlementService:
         *,
         repository: Repository,
         binance: BinanceProvider,
+        client: PolymarketReadClient | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self.repository = repository
         self.binance = binance
+        self.client = client
         self.clock = clock or (lambda: datetime.now(UTC))
 
     def settle_due(self, *, limit: int = 100) -> tuple[SettlementLabel, ...]:
@@ -34,7 +51,13 @@ class SettlementService:
         rows = self.repository.settlement_candidates(
             ready_before=now - timedelta(minutes=1), limit=limit
         )
-        return tuple(self._settle_rule(row, now=now) for row in rows)
+        labels: list[SettlementLabel] = []
+        for row in rows:
+            try:
+                labels.append(self._settle_rule(row, now=now))
+            except SettlementPendingError:
+                continue
+        return tuple(labels)
 
     def settle_market(self, market_id: str) -> SettlementLabel:
         row = self.repository.get_resolution_rule(market_id)
@@ -43,11 +66,19 @@ class SettlementService:
         return self._settle_rule(row, now=_utc(self.clock()))
 
     def _settle_rule(self, row: Row, *, now: datetime) -> SettlementLabel:
+        family = str(row["contract_family"] or DAILY_THRESHOLD_FAMILY)
+        if family == SHORT_UPDOWN_FAMILY:
+            return self._settle_short_updown(row, now=now)
+        if family != DAILY_THRESHOLD_FAMILY:
+            raise ValueError(f"unsupported settlement contract family: {family}")
+        return self._settle_daily_threshold(row, now=now)
+
+    def _settle_daily_threshold(self, row: Row, *, now: datetime) -> SettlementLabel:
         market_id = str(row["market_id"])
         target = _required_time(row, "target_time_utc")
         if now < target + timedelta(minutes=1):
             raise ValueError("settlement candle is not closed")
-        _require_contract(row)
+        _require_daily_contract(row)
 
         series = self.binance.get_klines(
             str(row["asset"]),
@@ -99,11 +130,83 @@ class SettlementService:
             observed_at=_utc(candle.close_time),
             received_at=received_at,
             source_version=SETTLEMENT_SOURCE_VERSION,
+            contract_family=DAILY_THRESHOLD_FAMILY,
+        )
+        return self.repository.save_settlement_label(label)
+
+    def _settle_short_updown(self, row: Row, *, now: datetime) -> SettlementLabel:
+        market_id = str(row["market_id"])
+        target = _required_time(row, "target_time_utc")
+        if now < target:
+            raise ValueError("settlement boundary has not passed")
+        _require_short_contract(row)
+        if self.client is None:
+            raise ValueError("Gamma client is required for short Up/Down settlement")
+        event_id = str(row["event_id"] or "")
+        if not event_id:
+            raise ValueError("missing event_id for short Up/Down settlement")
+
+        event = self.client.get_event(event_id)
+        received_at = _utc(self.clock())
+        payload_id = self.repository.record_external_payload(
+            market_id=market_id,
+            source="gamma",
+            payload_kind="chainlink_resolution_event",
+            payload=event,
+            observed_at=target,
+            received_at=received_at,
+            source_version=GAMMA_EVENT_SOURCE_VERSION,
+        )
+        resolved_market = _event_market(
+            event,
+            market_id=market_id,
+            condition_id=str(row["condition_id"] or ""),
+        )
+        if resolved_market is None:
+            raise SettlementPendingError("market missing from Gamma resolution event")
+        if resolved_market.get("closed") is not True:
+            raise SettlementPendingError("Gamma market is not resolved")
+
+        metadata = _mapping(
+            event.get("eventMetadata")
+            or resolved_market.get("eventMetadata")
+            or event.get("metadata")
+        )
+        start_price = _positive_decimal(metadata.get("priceToBeat"))
+        final_price = _positive_decimal(metadata.get("finalPrice"))
+        if start_price is None or final_price is None:
+            raise SettlementPendingError(
+                "Chainlink priceToBeat/finalPrice is not published"
+            )
+        resolved_up = _resolved_affirmative_outcome(resolved_market)
+        computed_up = threshold_satisfied(final_price, start_price, ">=")
+        if resolved_up is None:
+            raise SettlementPendingError("Gamma Up/Down outcome is not final")
+        if resolved_up != computed_up:
+            raise ValueError("Gamma outcome disagrees with Chainlink boundary prices")
+
+        label = SettlementLabel(
+            label_id=f"label:{uuid4()}",
+            market_id=market_id,
+            target_time_utc=target,
+            provider="chainlink",
+            pair=str(row["pair"]),
+            candle_interval=str(row["candle_interval"]),
+            price_field="data_stream_value",
+            exact_operator=">=",
+            strike=start_price,
+            observed_value=final_price,
+            outcome_yes=computed_up,
+            payload_id=payload_id,
+            observed_at=target,
+            received_at=received_at,
+            source_version=CHAINLINK_SETTLEMENT_SOURCE_VERSION,
+            contract_family=SHORT_UPDOWN_FAMILY,
         )
         return self.repository.save_settlement_label(label)
 
 
-def _require_contract(row: Row) -> None:
+def _require_daily_contract(row: Row) -> None:
     expected = {
         "settlement_source": "Binance",
         "candle_interval": "1m",
@@ -112,14 +215,119 @@ def _require_contract(row: Row) -> None:
     for field, value in expected.items():
         if str(row[field]).casefold() != value.casefold():
             raise ValueError(f"unsupported settlement {field}")
-    if str(row["asset"]) not in {"BTC", "ETH"}:
+    asset = str(row["asset"])
+    if asset not in SUPPORTED_ASSETS:
         raise ValueError("unsupported settlement asset")
-    if str(row["pair"]) not in {"BTC/USDT", "ETH/USDT"}:
+    if str(row["pair"]) != asset_contract(asset).binance_pair:
         raise ValueError("unsupported settlement pair")
     if str(row["exact_operator"]) not in {">", "<"}:
         raise ValueError("unsupported settlement operator")
-    if not bool(row["tradable"]):
+    keys = set(row.keys())
+    had_analyzed_predeadline_signal = (
+        bool(row["had_analyzed_predeadline_signal"])
+        if "had_analyzed_predeadline_signal" in keys
+        else False
+    )
+    if not bool(row["tradable"]) and not had_analyzed_predeadline_signal:
         raise ValueError("preview-only contract cannot be labeled")
+
+
+def _require_short_contract(row: Row) -> None:
+    expected = {
+        "settlement_source": "chainlink",
+        "price_field": "data_stream_value",
+        "exact_operator": ">=",
+        "timezone": "UTC",
+        "observation_time": "window_start",
+        "boundary_type": "window_start_price",
+        "affirmative_outcome": "Up",
+        "negative_outcome": "Down",
+    }
+    for field, value in expected.items():
+        if str(row[field]).casefold() != value.casefold():
+            raise ValueError(f"unsupported settlement {field}")
+    if str(row["candle_interval"]) not in {"5m", "15m"}:
+        raise ValueError("unsupported settlement candle_interval")
+    asset = str(row["asset"])
+    contract = asset_contract(asset)
+    if not contract.short_updown or str(row["pair"]) != contract.chainlink_pair:
+        raise ValueError("unsupported Chainlink settlement identity")
+    keys = set(row.keys())
+    had_analyzed_predeadline_signal = (
+        bool(row["had_analyzed_predeadline_signal"])
+        if "had_analyzed_predeadline_signal" in keys
+        else False
+    )
+    if not bool(row["tradable"]) and not had_analyzed_predeadline_signal:
+        raise ValueError("preview-only contract cannot be labeled")
+
+
+def _event_market(
+    event: dict[str, Any],
+    *,
+    market_id: str,
+    condition_id: str,
+) -> dict[str, Any] | None:
+    for market in event.get("markets") or []:
+        if not isinstance(market, dict):
+            continue
+        identifiers = {
+            str(market.get("id") or ""),
+            str(market.get("conditionId") or ""),
+        }
+        if market_id in identifiers or (condition_id and condition_id in identifiers):
+            return market
+    return None
+
+
+def _resolved_affirmative_outcome(market: dict[str, Any]) -> bool | None:
+    outcomes = [str(value).strip().lower() for value in _listish(market.get("outcomes"))]
+    prices = [_decimal(value) for value in _listish(market.get("outcomePrices"))]
+    if len(outcomes) != 2 or len(prices) != 2 or set(outcomes) != {"up", "down"}:
+        return None
+    up = prices[outcomes.index("up")]
+    down = prices[outcomes.index("down")]
+    if up == Decimal("1") and down == Decimal("0"):
+        return True
+    if up == Decimal("0") and down == Decimal("1"):
+        return False
+    return None
+
+
+def _mapping(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
+def _listish(value: Any) -> list[Any]:
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return []
+        return parsed if isinstance(parsed, list) else []
+    return []
+
+
+def _decimal(value: Any) -> Decimal | None:
+    try:
+        return Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+
+
+def _positive_decimal(value: Any) -> Decimal | None:
+    parsed = _decimal(value)
+    return parsed if parsed is not None and parsed > 0 else None
 
 
 def _required_time(row: Row, field: str) -> datetime:

@@ -1,0 +1,543 @@
+"""Seven-asset 5m/15m Chainlink Up/Down research loop."""
+
+from __future__ import annotations
+
+import json
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
+
+import pytest
+
+from crypto_threshold.adapters.polymarket.base import MarketEventContext
+from crypto_threshold.adapters.polymarket.translator import translate_market
+from crypto_threshold.adapters.prices.stream import ReferencePriceTick
+from crypto_threshold.config import Settings
+from crypto_threshold.domain.assets import ASSET_CONTRACTS, SHORT_UPDOWN_ASSETS
+from crypto_threshold.domain.rules import SHORT_UPDOWN_FAMILY, parse_contract
+from crypto_threshold.services.discovery_service import DiscoveryService
+from crypto_threshold.services.market_workflow_service import MarketWorkflowService
+from crypto_threshold.services.replay_service import ReplayService
+from crypto_threshold.services.schema_drift_service import ExternalPayloadSchemaMonitor
+from crypto_threshold.services.settlement_service import (
+    CHAINLINK_SETTLEMENT_SOURCE_VERSION,
+    SettlementPendingError,
+    SettlementService,
+)
+from crypto_threshold.services.shadow_monitor_service import ShadowMonitorService
+from crypto_threshold.storage.db import Database
+from crypto_threshold.storage.repositories import Repository
+
+NOW = datetime(2026, 7, 25, 12, 2, tzinfo=UTC)
+
+
+def _short_payload(
+    asset: str,
+    interval: str,
+    *,
+    market_id: str | None = None,
+    start: datetime | None = None,
+) -> dict[str, Any]:
+    contract = ASSET_CONTRACTS[asset]
+    minutes = 5 if interval == "5m" else 15
+    window_start = start or (NOW - timedelta(minutes=2))
+    end = window_start + timedelta(minutes=minutes)
+    slug = f"{asset.lower()}-up-or-down-{interval}"
+    event_id = f"event-{asset.lower()}-{interval}"
+    identifier = market_id or f"market-{asset.lower()}-{interval}"
+    description = (
+        "This market will resolve to \"Up\" if the Chainlink "
+        f"{contract.chainlink_pair} Data Stream value at the end of the time "
+        "range specified in the title is greater than or equal to the value "
+        "at the beginning of that range. Otherwise, this market will resolve "
+        "to \"Down\"."
+    )
+    event = {
+        "id": event_id,
+        "startTime": window_start.isoformat(),
+        "endDate": end.isoformat(),
+        "seriesSlug": slug,
+        "recurrence": "daily",
+        "series": [{"slug": slug, "recurrence": "daily"}],
+    }
+    return {
+        "id": identifier,
+        "eventId": event_id,
+        "conditionId": f"condition-{asset.lower()}-{interval}",
+        "question": f"{contract.display_name} Up or Down?",
+        "slug": f"{asset.lower()}-updown-window",
+        "description": description,
+        "active": True,
+        "closed": False,
+        "acceptingOrders": True,
+        "enableOrderBook": True,
+        "eventStartTime": window_start.isoformat(),
+        "endDate": end.isoformat(),
+        "outcomes": json.dumps(["Up", "Down"]),
+        "clobTokenIds": json.dumps(
+            [f"{identifier}-up-token", f"{identifier}-down-token"]
+        ),
+        "events": [event],
+    }
+
+
+@pytest.mark.parametrize("asset", sorted(SHORT_UPDOWN_ASSETS))
+@pytest.mark.parametrize("interval", ("5m", "15m"))
+def test_parser_supports_all_fourteen_live_contract_shapes(
+    asset: str,
+    interval: str,
+) -> None:
+    market = translate_market(_short_payload(asset, interval), received_at=NOW)
+    rule = parse_contract(market, now=NOW)
+
+    assert rule.tradable
+    assert rule.contract_family == SHORT_UPDOWN_FAMILY
+    assert rule.asset == asset
+    assert rule.settlement_provider == "chainlink"
+    assert rule.pair == ASSET_CONTRACTS[asset].chainlink_pair
+    assert rule.candle_interval == interval
+    assert rule.price_field == "data_stream_value"
+    assert rule.exact_operator == ">="
+    assert rule.affirmative_outcome == "Up"
+    assert rule.negative_outcome == "Down"
+    assert rule.window_start_time_utc is not None
+    assert rule.target_time_utc is not None
+
+
+def test_short_parser_rejects_source_pair_duration_and_status_mismatch() -> None:
+    payload = _short_payload("BTC", "5m")
+    bad_source = {
+        **payload,
+        "description": str(payload["description"]).replace("Chainlink", "Binance"),
+    }
+    assert "unsupported_settlement_provider:binance" in parse_contract(
+        translate_market(bad_source, received_at=NOW),
+        now=NOW,
+    ).rejection_reasons
+
+    bad_pair = {
+        **payload,
+        "description": str(payload["description"]).replace("BTC/USD", "ETH/USD"),
+    }
+    assert any(
+        reason.startswith("pair_mismatch:")
+        for reason in parse_contract(
+            translate_market(bad_pair, received_at=NOW),
+            now=NOW,
+        ).rejection_reasons
+    )
+
+    bad_duration = {
+        **payload,
+        "endDate": (NOW + timedelta(minutes=8)).isoformat(),
+    }
+    assert "window_duration_mismatch" in parse_contract(
+        translate_market(bad_duration, received_at=NOW),
+        now=NOW,
+    ).rejection_reasons
+
+    expired = _short_payload(
+        "BTC",
+        "5m",
+        start=NOW - timedelta(minutes=10),
+    )
+    expired_rule = parse_contract(
+        translate_market(expired, received_at=NOW),
+        now=NOW,
+    )
+    assert "target_time_not_future" in expired_rule.rejection_reasons
+    assert "gamma_market_expired" in expired_rule.rejection_reasons
+
+
+class _ShortClient:
+    def __init__(self, payloads: list[dict[str, Any]]) -> None:
+        self.payloads = payloads
+        self.reads: list[str] = []
+        self.resolution_events: dict[str, dict[str, Any]] = {}
+
+    def discover_updown_markets(
+        self,
+        intervals: tuple[str, ...],
+        *,
+        start: datetime,
+        end: datetime,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        self.reads.append(f"discover:{','.join(intervals)}")
+        return self.payloads[:limit]
+
+    def discover_markets(
+        self,
+        asset: str | None,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        raise AssertionError("daily discovery must not be used")
+
+    def get_market(self, market_id: str) -> dict[str, Any]:
+        self.reads.append("market")
+        return next(payload for payload in self.payloads if payload["id"] == market_id)
+
+    def get_event(self, event_id: str) -> dict[str, Any]:
+        self.reads.append("event")
+        return self.resolution_events[event_id]
+
+    def get_market_event_context(
+        self,
+        market_id: str,
+        condition_id: str | None,
+        question: str,
+    ) -> MarketEventContext:
+        raise AssertionError("embedded event identity should be sufficient")
+
+    def get_order_book(self, token_id: str) -> dict[str, Any]:
+        self.reads.append(f"book:{token_id}")
+        is_up = token_id.endswith("up-token")
+        return {
+            "timestamp": str(int(NOW.timestamp() * 1000)),
+            "bids": [{"price": "0.48" if is_up else "0.47", "size": "100"}],
+            "asks": [
+                {"price": "0.50" if is_up else "0.51", "size": "100"}
+            ],
+        }
+
+    def get_market_info(self, condition_id: str) -> dict[str, Any]:
+        self.reads.append("market_info")
+        return {"fd": {"r": 0.07, "e": 1, "to": True}}
+
+
+class _NoDailyProvider:
+    def __getattr__(self, name: str) -> Any:
+        raise AssertionError(f"daily provider must not be used: {name}")
+
+
+class _ChainlinkHistory:
+    def __init__(self, payload: dict[str, Any], *, missing_boundary: bool = False) -> None:
+        self.payload = payload
+        self.missing_boundary = missing_boundary
+        market = translate_market(payload, received_at=NOW)
+        assert market.event_start_time is not None
+        self.start = market.event_start_time
+        pair = ASSET_CONTRACTS["BTC"].chainlink_pair
+        self.ticks = tuple(
+            ReferencePriceTick(
+                provider="chainlink",
+                pair=pair,
+                candle_interval="tick",
+                price_field="value",
+                price=Decimal("100000") + Decimal(index),
+                provider_timestamp=self.start + timedelta(seconds=index * 5),
+                received_at=self.start + timedelta(seconds=index * 5, milliseconds=50),
+                fresh=True,
+                source_version="chainlink-test-v1",
+                sequence=str(index),
+                payload_hash=f"{index:064x}",
+                raw_payload={"index": index},
+            )
+            for index in range(25)
+        )
+
+    def boundary_tick(
+        self,
+        pair: str,
+        boundary: datetime,
+        *,
+        tolerance_seconds: float,
+    ) -> ReferencePriceTick | None:
+        if self.missing_boundary:
+            return None
+        return self.ticks[0]
+
+    def latest_tick(
+        self,
+        pair: str,
+        *,
+        at: datetime | None = None,
+        max_age_seconds: float | None = None,
+    ) -> ReferencePriceTick | None:
+        return self.ticks[-1]
+
+    def history(
+        self,
+        pair: str,
+        *,
+        start: datetime | None = None,
+        end: datetime | None = None,
+    ) -> tuple[ReferencePriceTick, ...]:
+        return self.ticks
+
+
+def _short_workflow(
+    tmp_path: Path,
+    *,
+    missing_boundary: bool = False,
+) -> tuple[MarketWorkflowService, Repository, _ShortClient]:
+    database = Database(tmp_path / "short.db")
+    database.initialize()
+    repository = Repository(database)
+    payload = _short_payload("BTC", "5m")
+    client = _ShortClient([payload])
+    settings = Settings(
+        DATABASE_PATH=str(database.path),
+        CHAINLINK_REFERENCE_STREAM_STALE_SECONDS=10,
+        CHAINLINK_VOLATILITY_SAMPLE_SECONDS=5,
+        _env_file=None,
+    )
+    workflow = MarketWorkflowService(
+        client=client,
+        repository=repository,
+        binance=_NoDailyProvider(),  # type: ignore[arg-type]
+        coinbase=_NoDailyProvider(),  # type: ignore[arg-type]
+        settings=settings,
+        chainlink_stream=_ChainlinkHistory(
+            payload,
+            missing_boundary=missing_boundary,
+        ),  # type: ignore[arg-type]
+        clock=lambda: NOW + timedelta(seconds=1),
+    )
+    return workflow, repository, client
+
+
+def test_workflow_uses_chainlink_boundary_and_persists_exact_inputs(
+    tmp_path: Path,
+) -> None:
+    workflow, repository, _ = _short_workflow(tmp_path)
+
+    signal = workflow.analyze("market-btc-5m")
+
+    assert signal.status == "analyzed"
+    assert signal.contract_family == SHORT_UPDOWN_FAMILY
+    assert signal.affirmative_outcome == "Up"
+    assert signal.negative_outcome == "Down"
+    assert signal.threshold == Decimal("100000")
+    assert signal.model_name == "gbm_window_direction"
+    roles = {
+        str(row["input_role"])
+        for row in repository.signal_input_rows(signal.signal_id)
+    }
+    assert {
+        "market",
+        "up_book",
+        "down_book",
+        "market_info_fee_schedule",
+        "chainlink_start_price",
+        "chainlink_current_price",
+        "chainlink_volatility_window",
+    }.issubset(roles)
+    report = ExternalPayloadSchemaMonitor(repository).inspect_after(0)
+    assert report.status == "ok"
+
+
+def test_workflow_hard_rejects_when_start_boundary_was_missed(
+    tmp_path: Path,
+) -> None:
+    workflow, repository, _ = _short_workflow(tmp_path, missing_boundary=True)
+
+    signal = workflow.analyze("market-btc-5m")
+
+    assert signal.status == "rejected"
+    assert "missing_chainlink_window_start_tick" in signal.reasons
+    assert signal.estimated_probability is None
+    assert repository.table_count("analysis_signals") == 1
+
+
+def test_discovery_persists_exactly_fourteen_open_markets_without_duplicates(
+    tmp_path: Path,
+) -> None:
+    payloads = [
+        _short_payload(asset, interval)
+        for interval in ("5m", "15m")
+        for asset in sorted(SHORT_UPDOWN_ASSETS)
+    ]
+    client = _ShortClient(payloads + payloads)
+    database = Database(tmp_path / "discovery.db")
+    database.initialize()
+    repository = Repository(database)
+    service = DiscoveryService(client, repository, clock=lambda: NOW)
+
+    first = service.discover_updown(limit=50)
+    second = service.discover_updown(limit=50)
+
+    assert len(first) == 14
+    assert len(second) == 14
+    assert all(result.rule.tradable for result in first)
+    assert repository.table_count("markets") == 14
+    assert repository.table_count("resolution_rules") == 14
+
+
+def test_chainlink_settlement_tie_resolves_up_and_persists_raw_first(
+    tmp_path: Path,
+) -> None:
+    workflow, repository, client = _short_workflow(tmp_path)
+    signal = workflow.analyze("market-btc-5m")
+    assert signal.threshold is not None and signal.deadline is not None
+    event_id = "event-btc-5m"
+    client.resolution_events[event_id] = {
+        "id": event_id,
+        "eventMetadata": {
+            "priceToBeat": str(signal.threshold),
+            "finalPrice": str(signal.threshold),
+        },
+        "markets": [
+            {
+                "id": signal.market_id,
+                "conditionId": "condition-btc-5m",
+                "closed": True,
+                "outcomes": json.dumps(["Up", "Down"]),
+                "outcomePrices": json.dumps(["1", "0"]),
+            }
+        ],
+    }
+    service = SettlementService(
+        repository=repository,
+        binance=_NoDailyProvider(),  # type: ignore[arg-type]
+        client=client,
+        clock=lambda: signal.deadline + timedelta(minutes=1),
+    )
+
+    label = service.settle_market(signal.market_id)
+
+    assert label.outcome_yes
+    assert label.provider == "chainlink"
+    assert label.strike == label.observed_value == signal.threshold
+    assert label.source_version == CHAINLINK_SETTLEMENT_SOURCE_VERSION
+    assert label.contract_family == SHORT_UPDOWN_FAMILY
+    payloads = repository.external_payload_rows_after(label.payload_id - 1)
+    assert len(payloads) == 1
+    assert payloads[0]["payload_kind"] == "chainlink_resolution_event"
+    replay = ReplayService(
+        repository,
+        clock=lambda: signal.deadline + timedelta(minutes=2),
+    ).build(
+        "short-updown-v1",
+        contract_family=SHORT_UPDOWN_FAMILY,
+    )
+    assert replay.item_count == 1
+    assert ReplayService(repository).verify(replay.dataset_id).ok
+
+
+def test_chainlink_settlement_waits_for_final_price(tmp_path: Path) -> None:
+    workflow, repository, client = _short_workflow(tmp_path)
+    signal = workflow.analyze("market-btc-5m")
+    assert signal.threshold is not None and signal.deadline is not None
+    client.resolution_events["event-btc-5m"] = {
+        "id": "event-btc-5m",
+        "eventMetadata": {"priceToBeat": str(signal.threshold)},
+        "markets": [
+            {
+                "id": signal.market_id,
+                "closed": True,
+                "outcomes": ["Up", "Down"],
+                "outcomePrices": ["0.5", "0.5"],
+            }
+        ],
+    }
+    service = SettlementService(
+        repository=repository,
+        binance=_NoDailyProvider(),  # type: ignore[arg-type]
+        client=client,
+        clock=lambda: signal.deadline + timedelta(minutes=1),
+    )
+
+    with pytest.raises(SettlementPendingError):
+        service.settle_market(signal.market_id)
+    assert repository.get_settlement_label(signal.market_id) is None
+
+
+def test_replay_excludes_signal_when_final_boundary_disagrees(
+    tmp_path: Path,
+) -> None:
+    workflow, repository, client = _short_workflow(tmp_path)
+    signal = workflow.analyze("market-btc-5m")
+    assert signal.threshold is not None and signal.deadline is not None
+    authoritative_start = signal.threshold + Decimal("1")
+    client.resolution_events["event-btc-5m"] = {
+        "id": "event-btc-5m",
+        "eventMetadata": {
+            "priceToBeat": str(authoritative_start),
+            "finalPrice": str(authoritative_start + Decimal("1")),
+        },
+        "markets": [
+            {
+                "id": signal.market_id,
+                "closed": True,
+                "outcomes": ["Up", "Down"],
+                "outcomePrices": ["1", "0"],
+            }
+        ],
+    }
+    SettlementService(
+        repository=repository,
+        binance=_NoDailyProvider(),  # type: ignore[arg-type]
+        client=client,
+        clock=lambda: signal.deadline + timedelta(minutes=1),
+    ).settle_market(signal.market_id)
+
+    replay = ReplayService(repository).build(
+        "mismatched-boundary",
+        contract_family=SHORT_UPDOWN_FAMILY,
+    )
+
+    assert replay.item_count == 0
+    assert replay.rejection_reasons == (
+        f"{signal.signal_id}:settlement_threshold_mismatch",
+    )
+
+
+def test_short_shadow_analyzes_all_fourteen_markets_in_one_cycle(
+    tmp_path: Path,
+) -> None:
+    database = Database(tmp_path / "shadow.db")
+    database.initialize()
+    repository = Repository(database)
+    results = [
+        SimpleNamespace(
+            market=SimpleNamespace(market_id=f"market-{index}"),
+            rule=SimpleNamespace(tradable=True, asset=asset),
+        )
+        for index, asset in enumerate(
+            sorted(SHORT_UPDOWN_ASSETS) * 2,
+            start=1,
+        )
+    ]
+
+    class Discovery:
+        def discover_updown(self, *, limit: int) -> list[Any]:
+            return results[:limit]
+
+    class Workflow:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def analyze(self, market_id: str) -> Any:
+            self.calls.append(market_id)
+            return SimpleNamespace()
+
+    class Paper:
+        def record(self, signal: Any) -> tuple[Any, bool]:
+            return SimpleNamespace(action="skip"), True
+
+        def settle_open(self) -> int:
+            return 0
+
+    workflow = Workflow()
+    monitor = ShadowMonitorService(
+        repository=repository,
+        discovery=Discovery(),  # type: ignore[arg-type]
+        workflow=workflow,  # type: ignore[arg-type]
+        paper=Paper(),  # type: ignore[arg-type]
+        contract_family=SHORT_UPDOWN_FAMILY,
+        discovery_limit=14,
+        analysis_limit=14,
+        clock=lambda: NOW,
+    )
+
+    cycle = monitor.run_once()
+
+    assert len(workflow.calls) == 14
+    assert cycle.discovered_count == 14
+    assert cycle.analyzed_count == 14
+    assert cycle.contract_family == SHORT_UPDOWN_FAMILY
+    row = repository.list_shadow_cycles(limit=1)[0]
+    assert row["contract_family"] == SHORT_UPDOWN_FAMILY

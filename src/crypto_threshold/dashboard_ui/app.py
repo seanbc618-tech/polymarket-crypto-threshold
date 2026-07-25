@@ -39,7 +39,7 @@ def render_overview(
     wallet = read_wallet_status(settings, keychain)
     body = [
         flash(query, lang),
-        '<p class="eyebrow">BTC · ETH · Binance 1m Close</p>',
+        '<p class="eyebrow">BTC · ETH · SOL · XRP · Binance 1m Close</p>',
         f"<h2>{e(t(lang, 'overview.title'))}</h2>",
         f"<p class=\"lede\">{e(t(lang, 'overview.subtitle'))}</p>",
         section(

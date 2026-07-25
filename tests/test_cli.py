@@ -140,6 +140,20 @@ def test_shadow_rejects_private_key_from_process_environment(
     assert "test-secret" not in result.output
 
 
+def test_short_shadow_requires_public_chainlink_stream(
+    monkeypatch: object,
+) -> None:
+    monkeypatch.setenv("SHADOW_ENABLED", "true")
+    monkeypatch.setenv("SHADOW_CONTRACT_FAMILY", "short_updown")
+    monkeypatch.setenv("CHAINLINK_REFERENCE_STREAM_ENABLED", "false")
+    get_settings.cache_clear()
+    result = runner.invoke(app, ["shadow", "--once"])
+    get_settings.cache_clear()
+
+    assert result.exit_code == 2
+    assert "requires the public Chainlink stream" in result.output
+
+
 def test_empty_replay_build_is_persisted_but_fails_acceptance(
     tmp_path: Path, monkeypatch: object
 ) -> None:

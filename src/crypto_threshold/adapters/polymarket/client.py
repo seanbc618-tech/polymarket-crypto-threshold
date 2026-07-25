@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 import httpx
 
 from crypto_threshold.adapters.polymarket.base import MarketEventContext
 from crypto_threshold.config import Settings
+from crypto_threshold.domain.assets import DAILY_THRESHOLD_ASSETS, asset_contract
 
 
 class GammaClobReadClient:
@@ -24,17 +26,14 @@ class GammaClobReadClient:
             self._client.close()
 
     def discover_markets(self, asset: str | None, limit: int) -> list[dict[str, Any]]:
-        assets = [asset.upper()] if asset else ["BTC", "ETH"]
-        query_names = {
-            "BTC": ("Bitcoin above", "Bitcoin below"),
-            "ETH": ("Ethereum above", "Ethereum below"),
-        }
+        assets = [asset.upper()] if asset else sorted(DAILY_THRESHOLD_ASSETS)
         queries: list[str] = []
         for symbol in assets:
-            names = query_names.get(symbol)
-            if names is None:
-                raise ValueError(f"unsupported discovery asset: {symbol}")
-            queries.extend(names)
+            try:
+                name = asset_contract(symbol).display_name
+            except ValueError as exc:
+                raise ValueError(f"unsupported discovery asset: {symbol}") from exc
+            queries.extend((f"{name} above", f"{name} below"))
         per_query = max(1, (limit + len(queries) - 1) // len(queries))
         results: list[dict[str, Any]] = []
         seen: set[str] = set()
@@ -64,6 +63,69 @@ class GammaClobReadClient:
                     break
         return results[:limit]
 
+    def discover_updown_markets(
+        self,
+        intervals: tuple[str, ...],
+        *,
+        start: datetime,
+        end: datetime,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        tags = {"5m": "5M", "15m": "15M"}
+        requested = tuple(dict.fromkeys(interval.lower() for interval in intervals))
+        if not requested or any(interval not in tags for interval in requested):
+            raise ValueError("up/down intervals must be 5m and/or 15m")
+        results: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        per_interval = max(7, (limit + len(requested) - 1) // len(requested))
+        for interval in requested:
+            response = self._client.get(
+                f"{self.gamma_base}/events",
+                params={
+                    "tag_slug": tags[interval],
+                    "closed": "false",
+                    "end_date_min": start.isoformat(),
+                    "end_date_max": end.isoformat(),
+                    "limit": min(500, per_interval * 4),
+                    "order": "endDate",
+                    "ascending": "true",
+                },
+            )
+            response.raise_for_status()
+            payload = response.json()
+            if not isinstance(payload, list):
+                raise ValueError("unexpected Gamma up/down discovery response")
+            added = 0
+            for event in payload:
+                if not isinstance(event, dict):
+                    continue
+                series_slug = str(event.get("seriesSlug") or "")
+                if not series_slug:
+                    series = event.get("series") or []
+                    if series and isinstance(series[0], dict):
+                        series_slug = str(series[0].get("slug") or "")
+                if not series_slug.lower().endswith(f"-{interval}"):
+                    continue
+                for market in event.get("markets") or []:
+                    if not isinstance(market, dict):
+                        continue
+                    key = str(
+                        market.get("id")
+                        or market.get("conditionId")
+                        or market.get("slug")
+                        or ""
+                    )
+                    if not key or key in seen:
+                        continue
+                    seen.add(key)
+                    results.append({**market, "events": [event]})
+                    added += 1
+                    if added >= per_interval or len(results) >= limit:
+                        break
+                if added >= per_interval or len(results) >= limit:
+                    break
+        return results[:limit]
+
     def get_market(self, market_id: str) -> dict[str, Any]:
         response = self._client.get(f"{self.gamma_base}/markets/{market_id}")
         if response.status_code == 404:
@@ -83,6 +145,14 @@ class GammaClobReadClient:
         payload = response.json()
         if not isinstance(payload, dict):
             raise ValueError("unexpected Gamma market response")
+        return payload
+
+    def get_event(self, event_id: str) -> dict[str, Any]:
+        response = self._client.get(f"{self.gamma_base}/events/{event_id}")
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise ValueError("unexpected Gamma event response")
         return payload
 
     def get_order_book(self, token_id: str) -> dict[str, Any]:

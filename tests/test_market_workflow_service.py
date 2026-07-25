@@ -6,6 +6,8 @@ import json
 from datetime import timedelta
 from pathlib import Path
 
+import pytest
+
 from crypto_threshold.config import Settings
 from crypto_threshold.services.market_workflow_service import MarketWorkflowService
 from crypto_threshold.storage.db import Database
@@ -15,6 +17,7 @@ from tests.conftest import (
     FakeBinanceProvider,
     FakeCoinbaseProvider,
     FakePolymarketClient,
+    make_market_payload,
 )
 
 
@@ -93,6 +96,42 @@ def test_complete_real_input_shape_persists_net_ev_and_raw_audit(
             "volatility_klines_1d",
             "sanity_spot",
         }
+
+
+@pytest.mark.parametrize(
+    ("asset", "name", "strike", "pair"),
+    [
+        ("SOL", "Solana", "50", "SOL/USDT"),
+        ("XRP", "XRP", "0.60", "XRP/USDT"),
+    ],
+)
+def test_additional_assets_complete_the_same_read_only_workflow(
+    tmp_path: Path,
+    asset: str,
+    name: str,
+    strike: str,
+    pair: str,
+) -> None:
+    payload = make_market_payload(
+        question=(
+            f"Will the price of {name} be above ${strike} on July 23, 2026?"
+        ),
+        description=(
+            f"This market resolves Yes using the Binance {pair} 1-minute "
+            "candle Close price at 12:00 PM ET."
+        ),
+    )
+    service, repository, _, _ = _workflow(
+        tmp_path,
+        payload,
+        coinbase=FakeCoinbaseProvider(asset=asset),
+    )
+
+    signal = service.analyze("market-1")
+
+    assert signal.status == "analyzed"
+    assert signal.asset == asset
+    assert repository.latest_signal("market-1")["asset"] == asset
 
 
 def test_stale_book_hard_rejects(

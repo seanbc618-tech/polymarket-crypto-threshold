@@ -1,4 +1,4 @@
-"""BTC/ETH market list and evidence detail pages."""
+"""Supported crypto market list and evidence detail pages."""
 
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ def render_markets(
     current_path: str,
     query: dict[str, list[str]],
 ) -> str:
-    rows = repository.list_dashboard_markets(limit=200)
+    rows = repository.list_dashboard_markets(limit=500)
     content = table(
         [
             "Market",
