@@ -39,7 +39,7 @@ do not attempt a fix. Return the report using the guide's fixed template.
 | Up/Down service | `crypto-threshold-updown-shadow.service` |
 | Up/Down DB | `/opt/polymarket-crypto-threshold/data/updown-shadow.db` |
 | Up/Down backup timer | `crypto-threshold-updown-backup.timer` |
-| Current deployment baseline | `b8e69d2` |
+| Current deployment baseline | `8866fb2` |
 
 The daily service is a bounded 73-hour evidence run. It began on
 2026-07-24 and is expected to exit normally around 2026-07-27 14:40 CST.
@@ -108,7 +108,7 @@ cat /opt/polymarket-crypto-threshold/.deployed-commit
 Expected:
 
 - NTP prints `yes`.
-- The deployment marker is `b8e69d2`, unless
+- The deployment marker is `8866fb2`, unless
   `docs/PROJECT-STATUS.md` records a newer reviewed deployment.
 
 Do not change a mismatched marker.
@@ -312,12 +312,18 @@ for label, path in DATABASES.items():
                     FROM settlement_attempts
                     """,
                 )
+                retry_rows = [
+                    row
+                    for row in attempt_rows
+                    if row[0] in {"pending", "error"}
+                ]
                 now = datetime.now(UTC)
                 due_count = sum(
                     1
-                    for _, next_attempt_at in attempt_rows
+                    for _, next_attempt_at in retry_rows
                     if next_attempt_at and as_utc(next_attempt_at) <= now
                 )
+                print("settlement_attempt_total", len(attempt_rows))
                 print("settlement_attempt_statuses", fetchall(
                     connection,
                     """
@@ -325,6 +331,15 @@ for label, path in DATABASES.items():
                     FROM settlement_attempts
                     GROUP BY last_status
                     ORDER BY last_status
+                    """,
+                ))
+                print("settlement_attempt_counts", fetchall(
+                    connection,
+                    """
+                    SELECT last_status, attempt_count, COUNT(*)
+                    FROM settlement_attempts
+                    GROUP BY last_status, attempt_count
+                    ORDER BY last_status, attempt_count
                     """,
                 ))
                 print("settlement_attempt_due_count", due_count)
@@ -418,9 +433,13 @@ Additional interpretation:
   substring `sign`.
 - Up/Down `boundary_mismatch` and `outcome_mismatch` must both be zero.
 - On schema v5, Up/Down must report `settlement_attempts` rather than
-  `MISSING`. Pending attempts are acceptable when their retry time is in the
-  future; a growing `settlement_attempt_due_count` is WARN and needs owner
-  review.
+  `MISSING`. The due count includes only `pending` and `error` rows;
+  succeeded rows are excluded because they should already have a label.
+  Pending attempts are acceptable when their retry time is in the future; a
+  growing `settlement_attempt_due_count` is WARN and needs owner review.
+- Compare pending attempt counts by `attempt_count` across checks. Both
+  attempt-1 rows and higher-attempt rows should advance over time. A stable
+  process with no higher-attempt progress is a scheduler starvation WARN.
 - `resolution_payload_summary` and `top_resolution_payload_markets` are
   cursors for comparing checks. Live books and ticks may grow the overall
   payload table. A market's resolution payload count or max ID should not
@@ -541,7 +560,8 @@ Up/Down service
 - Paper status counts:
 - Settlement label count:
 - Settlement attempt statuses:
-- Settlement attempt due count:
+- Pending/error attempt due count:
+- Attempt-count distribution:
 - Resolution payload summary/cursor:
 - Boundary mismatch:
 - Outcome mismatch:

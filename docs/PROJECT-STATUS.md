@@ -34,14 +34,14 @@ research only and does not make Phase 2 accepted. The independent
 direct-connect VPS against
 `/opt/polymarket-crypto-threshold/data/updown-shadow.db`.
 
-On 2026-07-26, the Up/Down service was briefly restarted with explicit owner
-approval to activate commit `b8e69d2`. The migration advanced its database to
-schema v5 and added durable per-market settlement attempt state. The daily
-service was not restarted and retained PID `49268`. Post-restart cycles
-confirmed that 14 incomplete older markets were placed on a future retry
-schedule while 14 later markets were processed, avoiding FIFO head-of-line
-starvation. This is an operational correctness fix, not Phase 2 acceptance
-evidence.
+On 2026-07-26, the Up/Down service was briefly restarted twice with explicit
+owner approval. Commit `b8e69d2` first added schema v5 settlement state; commit
+`8866fb2` then corrected the scheduler so due retries and never-attempted
+candidates are interleaved within each batch. The daily service was not
+restarted and retained PID `49268`. The second deployment showed old pending
+markets advancing from attempt 1 to attempt 2 while new candidates continued
+to be processed, avoiding FIFO head-of-line starvation. This is an
+operational correctness fix, not Phase 2 acceptance evidence.
 
 No order signer, authenticated trading client, BUY/SELL method, cancellation
 path, or position mutation exists in the runtime. Setting
@@ -112,8 +112,10 @@ path, or position mutation exists in the runtime. Setting
 - Schema v5 durable settlement scheduling records each market's attempt count,
   status, next eligible retry, reason, and last resolution payload. Pending
   resolutions use bounded backoff (`5m`, `15m`, `1h`, `6h`); isolated errors
-  use a one-hour retry. Candidate selection is due-time ordered so one
-  incomplete market cannot starve later markets.
+  use a one-hour retry. Candidate selection ranks due rows within separate
+  retry and never-attempted groups, then interleaves the groups so one
+  incomplete market cannot starve later markets and new candidates cannot
+  permanently starve retries.
 - Settlement resolution payloads use a settlement-semantic fingerprint before
   insertion. Repeated Gamma bodies do not create new `external_payloads` rows;
   existing historical duplicates are retained for audit and are not compacted
@@ -360,15 +362,19 @@ project review and never authorizes live capital or Phase 3 trading work.
   and clean schema-drift evidence. Its mechanical report is correctly
   `PENDING/NOT ACCEPTED`: closed-tick evidence now passes, while replay,
   calibration, 72-hour coverage, and reconnect remain pending.
-- On 2026-07-26 after activating `b8e69d2`, the Up/Down VPS process remained
-  `active/running` at PID `115221` with zero restarts, while the daily process
-  remained PID `49268` with zero restarts. The Up/Down database reported
-  schema v5, 70 settlement attempts (`28 pending`, `42 succeeded`), zero
-  currently due retries, and four consecutive `complete_rest_fallback`
-  cycles during the first observation window.
+- On 2026-07-26 at `14:21:39 UTC`, after activating `8866fb2`, the Up/Down
+  VPS process remained `active/running` at PID `118423` with zero restarts,
+  while the daily process remained PID `49268` with zero restarts. At
+  `14:26:40 UTC`, the Up/Down database reported schema v5, 175 pending
+  attempts (147 at attempt 1 and 28 at attempt 2), 553 succeeded attempts,
+  and five consecutive `complete_rest_fallback` cycles.
+- At that same snapshot, 133 pending/error attempts were due for another
+  retry. This is a visible backlog-capacity warning, not a claim of
+  acceptance: the retry/new interleaving is progressing old attempts, but
+  the incoming unresolved-market rate can exceed the reserved retry slots.
 - The known incomplete market `3078822` remained at 1,345
   `chainlink_resolution_event` payload rows with last ID `184505` and last
-  receipt `2026-07-26T13:12:45Z` throughout the post-activation observation.
+  receipt `2026-07-26T13:12:45Z` throughout both post-activation observations.
   Overall payload growth continued for legitimate live books and price ticks,
   but this resolution payload did not grow from repeated unchanged responses.
 - The service remains public, read-only, and shadow-only: no signer,
@@ -401,6 +407,10 @@ project review and never authorizes live capital or Phase 3 trading work.
   meaning, but it does not remove the large historical duplicate payload
   backlog. Missing `finalPrice` remains a legitimate pending state and cannot
   be converted into a label by the scheduler.
+- The current retry quota is deliberately bounded to preserve new-candidate
+  coverage. If unresolved markets arrive faster than retry capacity, the
+  pending/error due backlog can grow even while every group receives service;
+  this needs capacity policy and monitoring before any stronger claim.
 - Gamma's 5m/15m discovery metadata can report misleading recurrence values;
   discovery therefore verifies series slug and exact window duration.
 - Stream Market Channel data is BBO-only acceleration, not L2 executable depth;
