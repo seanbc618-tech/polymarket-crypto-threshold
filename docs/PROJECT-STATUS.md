@@ -248,6 +248,10 @@ project review and never authorizes live capital or Phase 3 trading work.
 
 ## Verification Evidence
 
+- Settlement scheduler follow-up commit `8866fb2` added the long-running
+  retry/new rotation test. The final local verification for this change was
+  `217 passed`; Ruff reported no findings, mypy reported no issues in 52
+  source files, and `git diff --check` was clean.
 - Current local gate on 2026-07-25: `212 passed`; Ruff reported no findings;
   mypy reported no issues in 52 source files; `git diff --check` was clean.
 - The short-Up/Down directed suite covers all 7 assets across both intervals,
