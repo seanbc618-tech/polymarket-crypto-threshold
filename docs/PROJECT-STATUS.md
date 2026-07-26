@@ -356,8 +356,11 @@ project review and never authorizes live capital or Phase 3 trading work.
   `NTPSynchronized=yes`; the observed `+2.824872s` correction removed the
   received-before-provider timestamp violation. Shadow startup now waits for
   `systemd-time-wait-sync.service`.
-- The fresh formal evidence window began at
-  `2026-07-24T05:34:07.579835+00:00`. After a bounded deployment-unit restart,
+- The fresh formal database evidence begins at
+  `2026-07-24T05:34:07.579835+00:00`. The current daily systemd process start
+  is `2026-07-24T05:39:56 CST`, so the first 5m48s of database history
+  predates that process and must not be attributed to the current service
+  without separate provenance. After the bounded deployment-unit restart,
   three cycles remained continuous with no gap above 300 seconds. The active
   process uses a 73-hour wall-clock bound so the 180-second cadence can still
   produce at least 72 persisted hours.
@@ -384,6 +387,12 @@ project review and never authorizes live capital or Phase 3 trading work.
 - The service remains public, read-only, and shadow-only: no signer,
   authenticated reconciliation, BUY/SELL, order, fill, or position mutation
   was executed during activation or verification.
+- A Grok report observed at `2026-07-26T15:07:44Z` was useful as a health
+  report but was not cursor-bounded: its `max_received_at` was later than its
+  own observation time, and it omitted the age of one `in_progress` attempt.
+  It is not accepted as a time-bounded evidence snapshot. The monitoring guide
+  now requires a read window, one read-only transaction, process-versus-marker
+  distinction, and explicit DB-history-versus-service-start comparison.
 - `crypto-threshold-backup.timer` is active. A manual WAL-consistent backup
   completed with `PRAGMA integrity_check=ok`; source and backup contained no
   order/fill/position/signer/reconciliation tables.

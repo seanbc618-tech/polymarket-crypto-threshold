@@ -131,6 +131,17 @@ Interpretation:
 - Up/Down: `active/running` is PASS.
 - `failed`, non-zero exit, or any restart increase is FAIL.
 - Current known restart baseline is zero for both services.
+- `ExecMainStartTimestamp` is the service process start. When a service is
+  active, `InactiveEnterTimestamp` is historical systemd state and must not be
+  treated as its current start or completion time.
+- `.deployed-commit` identifies the filesystem tree, not code already loaded
+  into a running Python process. If a service started before the marker was
+  changed, report its loaded code version as `UNKNOWN` and do not say that the
+  marker proves that process is running the new code.
+- Compare each database's first `shadow_cycles.started_at` with that service's
+  `ExecMainStartTimestamp`. If the database begins earlier, report
+  `DB_HISTORY_PREDATES_SERVICE_START` and do not use the database minimum as
+  the continuous service-window start without documented provenance.
 
 ### 3. Recent Logs
 
@@ -224,11 +235,13 @@ for label, path in DATABASES.items():
         continue
 
     try:
+        read_started_at = datetime.now(UTC)
         connection = sqlite3.connect(
             f"{path.as_uri()}?mode=ro",
             uri=True,
         )
         connection.execute("PRAGMA query_only = ON")
+        connection.execute("BEGIN")
 
         tables = {
             row[0]
@@ -308,21 +321,17 @@ for label, path in DATABASES.items():
                 attempt_rows = fetchall(
                     connection,
                     """
-                    SELECT last_status, next_attempt_at
+                    SELECT market_id, last_status, attempt_count,
+                           last_attempt_at, next_attempt_at, updated_at,
+                           last_reason
                     FROM settlement_attempts
                     """,
                 )
                 retry_rows = [
                     row
                     for row in attempt_rows
-                    if row[0] in {"pending", "error"}
+                    if row[1] in {"pending", "error"}
                 ]
-                now = datetime.now(UTC)
-                due_count = sum(
-                    1
-                    for _, next_attempt_at in retry_rows
-                    if next_attempt_at and as_utc(next_attempt_at) <= now
-                )
                 print("settlement_attempt_total", len(attempt_rows))
                 print("settlement_attempt_statuses", fetchall(
                     connection,
@@ -342,8 +351,12 @@ for label, path in DATABASES.items():
                     ORDER BY last_status, attempt_count
                     """,
                 ))
-                print("settlement_attempt_due_count", due_count)
-                print("resolution_payload_summary", fetchall(
+                print("settlement_in_progress", [
+                    (row[0], row[2], row[3], row[5], row[6])
+                    for row in attempt_rows
+                    if row[1] == "in_progress"
+                ])
+                resolution_payload_summary = fetchall(
                     connection,
                     """
                     SELECT payload_kind, COUNT(*), MAX(id), MAX(received_at)
@@ -351,7 +364,8 @@ for label, path in DATABASES.items():
                     WHERE payload_kind = 'chainlink_resolution_event'
                     GROUP BY payload_kind
                     """,
-                ))
+                )
+                print("resolution_payload_summary", resolution_payload_summary)
                 print("top_resolution_payload_markets", fetchall(
                     connection,
                     """
@@ -410,10 +424,45 @@ for label, path in DATABASES.items():
             ).fetchone()[0]
             print("boundary_mismatch", boundary_mismatch)
             print("outcome_mismatch", outcome_mismatch)
+        read_finished_at = datetime.now(UTC)
+        print("read_window", read_started_at.isoformat(), read_finished_at.isoformat())
+        if label == "updown" and "settlement_attempts" in tables:
+            due_count = sum(
+                1
+                for _, _, _, _, next_attempt_at, _, _ in retry_rows
+                if next_attempt_at and as_utc(next_attempt_at) <= read_finished_at
+            )
+            print("settlement_attempt_due_count", due_count)
+            in_progress_ages = []
+            for row in attempt_rows:
+                if row[1] != "in_progress":
+                    continue
+                attempted_at = as_utc(row[3])
+                if attempted_at is not None:
+                    in_progress_ages.append(
+                        round(
+                            (read_finished_at - attempted_at).total_seconds(),
+                            1,
+                        )
+                    )
+            print("settlement_in_progress_age_seconds", in_progress_ages)
+            max_received_at = (
+                resolution_payload_summary[0][3]
+                if resolution_payload_summary
+                else None
+            )
+            if max_received_at and as_utc(max_received_at) > read_finished_at:
+                print(
+                    "snapshot_consistency",
+                    "INCOMPLETE: max_received_at_after_read_window",
+                )
+            else:
+                print("snapshot_consistency", "PASS")
     except Exception as error:
         print("ERROR", type(error).__name__, str(error))
     finally:
         if "connection" in locals():
+            connection.rollback()
             connection.close()
             del connection
 PY
@@ -440,16 +489,29 @@ Additional interpretation:
 - Compare pending attempt counts by `attempt_count` across checks. Both
   attempt-1 rows and higher-attempt rows should advance over time. A stable
   process with no higher-attempt progress is a scheduler starvation WARN.
+- `settlement_in_progress_age_seconds` must be reported. A single young
+  `in_progress` row can be a read-time race; an `in_progress` row older than
+  10 minutes, or one that persists across a permitted recheck, is WARN and
+  needs owner review.
 - `resolution_payload_summary` and `top_resolution_payload_markets` are
   cursors for comparing checks. Live books and ticks may grow the overall
   payload table. A market's resolution payload count or max ID should not
   advance merely because Gamma returned the same settlement meaning. Existing
   historical duplicates are evidence, not a reason to delete rows.
+- `read_window` and `snapshot_consistency` are mandatory. If any
+  `received_at` cursor is later than the read window end, label the report
+  `SNAPSHOT_INCOMPLETE` inside the WARN verdict and do not use that cursor as
+  a time-bounded claim. The read-only transaction is for consistency, not a
+  write or checkpoint.
 - After warm-up, the latest 14 Up/Down rows normally contain seven 5m and seven
   15m signals. A single stale/rejected asset is WARN, not proof of a broken
   service.
-- If Up/Down is WARN, wait five minutes and perform one read-only recheck. If it
-  remains WARN or worsens, report it. Do not loop indefinitely.
+- If WARN is caused by freshness, a degraded cycle, an in-progress age, or a
+  snapshot-consistency failure, wait five minutes and perform one read-only
+  recheck. Structural WARNs such as a known historical partial file, a
+  growing due backlog, or one isolated research rejection may be reported
+  without a second check when the latest cycle is fresh; state why no recheck
+  was needed. Do not loop indefinitely.
 - Rejections such as missing start tick, incomplete book, stale current tick,
   or insufficient volatility history are fail-closed research outcomes.
 - Repeated cycles with all 14 signals rejected after warm-up are WARN and need
@@ -486,7 +548,8 @@ Expected:
 - Both timers are `active/waiting` and `enabled`.
 - The final `find` command prints nothing.
 - A `.partial`, `.partial-wal`, or `.partial-shm` file is WARN. Report the exact
-  filename and do not delete it.
+  absolute path, distinguish daily root from `backups/updown`, and do not
+  delete it.
 - A missing scheduled backup or a backup older than 26 hours is WARN.
 
 Do not manually start a backup service. Backup creation is a mutation and is
@@ -500,8 +563,9 @@ Use one overall verdict:
   evidence is fresh, no error logs, no forbidden tables, and backup timers are
   healthy.
 - `WARN`: A transient rejection/degraded cycle, stale asset, delayed cycle,
-  stale backup, partial file, deployment mismatch, or unexpected metric needs
-  review but evidence is still readable.
+  stale backup, partial file, deployment mismatch, history-before-service
+  mismatch, `SNAPSHOT_INCOMPLETE`, or unexpected metric needs review but
+  evidence is still readable.
 - `FAIL`: A required service failed, active-service evidence is beyond the FAIL
   threshold, NTP is not synchronized, a DB is missing/unreadable, a forbidden
   table exists, boundary/outcome mismatch is non-zero, or logs show an
@@ -538,10 +602,14 @@ Daily service
 - Result/ExecMainStatus:
 - MainPID:
 - NRestarts:
-- Start/inactive time:
+- ExecMainStartTimestamp:
+- InactiveEnterTimestamp (informational only while active):
+- Filesystem marker vs loaded process:
 - DB schema:
 - Cycle count and time range:
+- DB first cycle vs service start:
 - Latest cycle age:
+- Expected completion / remaining time:
 - Last 5 cycle statuses:
 - Signal status counts:
 
@@ -550,9 +618,11 @@ Up/Down service
 - Result/ExecMainStatus:
 - MainPID:
 - NRestarts:
-- Start time:
+- ExecMainStartTimestamp:
+- Filesystem marker vs loaded process:
 - DB schema:
 - Cycle count and time range:
+- DB first cycle vs service start:
 - Latest cycle age:
 - Last 5 cycle statuses:
 - Latest 14 interval/status:
@@ -562,7 +632,9 @@ Up/Down service
 - Settlement attempt statuses:
 - Pending/error attempt due count:
 - Attempt-count distribution:
+- In-progress rows and age:
 - Resolution payload summary/cursor:
+- Read window and snapshot consistency:
 - Boundary mismatch:
 - Outcome mismatch:
 
