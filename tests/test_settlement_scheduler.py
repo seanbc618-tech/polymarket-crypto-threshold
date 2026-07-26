@@ -161,6 +161,46 @@ def test_pending_head_does_not_starve_later_candidates(tmp_path: Path) -> None:
     assert repository.table_count("settlement_labels") == 2
 
 
+def test_retry_and_new_candidates_keep_rotating(tmp_path: Path) -> None:
+    clock = [NOW]
+    service, repository, client, _ = _service(
+        tmp_path,
+        market_count=30,
+        resolved_ids=[f"market-{index:02d}" for index in range(14, 30)],
+        clock=clock,
+    )
+
+    assert service.settle_due(limit=14) == ()
+    clock[0] = NOW + timedelta(minutes=6)
+
+    labels = service.settle_due(limit=14)
+
+    assert {label.market_id for label in labels} == {
+        f"market-{index:02d}" for index in range(14, 21)
+    }
+    assert set(client.calls[14:]) == {
+        *(f"event-{index:02d}" for index in range(7)),
+        *(f"event-{index:02d}" for index in range(14, 21)),
+    }
+    with repository.database.connect() as connection:
+        attempts = connection.execute(
+            """
+            SELECT market_id, attempt_count
+            FROM settlement_attempts
+            ORDER BY market_id
+            """
+        ).fetchall()
+    assert [
+        (row["market_id"], row["attempt_count"])
+        for row in attempts
+        if row["market_id"] < "market-14"
+    ] == [
+        (f"market-{index:02d}", 2) for index in range(7)
+    ] + [
+        (f"market-{index:02d}", 1) for index in range(7, 14)
+    ]
+
+
 def test_pending_backoff_and_unchanged_payload_deduplication(
     tmp_path: Path,
 ) -> None:

@@ -694,65 +694,80 @@ class Repository:
             return list(
                 connection.execute(
                     """
-                    SELECT
-                        m.market_id,
-                        r.*,
-                        CASE WHEN EXISTS (
-                            SELECT 1
-                            FROM analysis_signals AS s
-                            WHERE s.market_id = m.market_id
-                              AND s.status = 'analyzed'
-                              AND s.observed_at < r.target_time_utc
-                              AND s.asset = r.asset
-                              AND s.contract_family = r.contract_family
-                              AND (
-                                  (r.contract_family = 'daily_threshold'
-                                   AND s.threshold = r.strike)
-                                  OR
-                                  (r.contract_family = 'short_updown'
-                                   AND CAST(s.threshold AS REAL) > 0)
-                              )
-                              AND s.deadline = r.target_time_utc
-                        ) THEN 1 ELSE 0 END AS had_analyzed_predeadline_signal
-                    FROM markets AS m
-                    JOIN resolution_rules AS r ON r.market_id = m.market_id
-                    LEFT JOIN settlement_labels AS l
-                      ON l.market_id = m.market_id
-                     AND l.target_time_utc = r.target_time_utc
-                    LEFT JOIN settlement_attempts AS a
-                      ON a.market_id = m.market_id
-                    WHERE (
-                        r.tradable = 1
-                        OR EXISTS (
-                            SELECT 1
-                            FROM analysis_signals AS s
-                            WHERE s.market_id = m.market_id
-                              AND s.status = 'analyzed'
-                              AND s.observed_at < r.target_time_utc
-                              AND s.asset = r.asset
-                              AND s.contract_family = r.contract_family
-                              AND (
-                                  (r.contract_family = 'daily_threshold'
-                                   AND s.threshold = r.strike)
-                                  OR
-                                  (r.contract_family = 'short_updown'
-                                   AND CAST(s.threshold AS REAL) > 0)
-                              )
-                              AND s.deadline = r.target_time_utc
-                        )
-                      )
-                      AND r.target_time_utc IS NOT NULL
-                      AND r.target_time_utc <= ?
-                      AND l.label_id IS NULL
-                      AND (
-                          a.next_attempt_at IS NULL
-                          OR a.next_attempt_at <= ?
-                      )
-                    ORDER BY
-                        CASE WHEN a.market_id IS NULL THEN 0 ELSE 1 END,
-                        COALESCE(a.next_attempt_at, r.target_time_utc),
-                        r.target_time_utc,
-                        m.market_id
+                    WITH eligible AS (
+                        SELECT
+                            m.market_id,
+                            r.*,
+                            CASE WHEN EXISTS (
+                                SELECT 1
+                                FROM analysis_signals AS s
+                                WHERE s.market_id = m.market_id
+                                  AND s.status = 'analyzed'
+                                  AND s.observed_at < r.target_time_utc
+                                  AND s.asset = r.asset
+                                  AND s.contract_family = r.contract_family
+                                  AND (
+                                      (r.contract_family = 'daily_threshold'
+                                       AND s.threshold = r.strike)
+                                      OR
+                                      (r.contract_family = 'short_updown'
+                                       AND CAST(s.threshold AS REAL) > 0)
+                                  )
+                                  AND s.deadline = r.target_time_utc
+                            ) THEN 1 ELSE 0 END AS had_analyzed_predeadline_signal,
+                            a.next_attempt_at AS next_attempt_at,
+                            CASE WHEN a.market_id IS NULL THEN 1 ELSE 0 END
+                                AS candidate_group
+                        FROM markets AS m
+                        JOIN resolution_rules AS r ON r.market_id = m.market_id
+                        LEFT JOIN settlement_labels AS l
+                          ON l.market_id = m.market_id
+                         AND l.target_time_utc = r.target_time_utc
+                        LEFT JOIN settlement_attempts AS a
+                          ON a.market_id = m.market_id
+                        WHERE (
+                            r.tradable = 1
+                            OR EXISTS (
+                                SELECT 1
+                                FROM analysis_signals AS s
+                                WHERE s.market_id = m.market_id
+                                  AND s.status = 'analyzed'
+                                  AND s.observed_at < r.target_time_utc
+                                  AND s.asset = r.asset
+                                  AND s.contract_family = r.contract_family
+                                  AND (
+                                      (r.contract_family = 'daily_threshold'
+                                       AND s.threshold = r.strike)
+                                      OR
+                                      (r.contract_family = 'short_updown'
+                                       AND CAST(s.threshold AS REAL) > 0)
+                                  )
+                                  AND s.deadline = r.target_time_utc
+                            )
+                          )
+                          AND r.target_time_utc IS NOT NULL
+                          AND r.target_time_utc <= ?
+                          AND l.label_id IS NULL
+                          AND (
+                              a.next_attempt_at IS NULL
+                              OR a.next_attempt_at <= ?
+                          )
+                    ),
+                    ranked AS (
+                        SELECT
+                            eligible.*,
+                            ROW_NUMBER() OVER (
+                                PARTITION BY candidate_group
+                                ORDER BY
+                                    COALESCE(next_attempt_at, target_time_utc),
+                                    target_time_utc,
+                                    market_id
+                            ) AS candidate_rank
+                        FROM eligible
+                    )
+                    SELECT *
+                    FROM ranked
+                    ORDER BY candidate_rank, candidate_group, target_time_utc, market_id
                     LIMIT ?
                     """,
                     (_iso(ready_before), _iso(ready_before), limit),
