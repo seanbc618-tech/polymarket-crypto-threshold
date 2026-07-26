@@ -27,7 +27,10 @@ from crypto_threshold.services.discovery_service import DiscoveryService
 from crypto_threshold.services.market_workflow_service import MarketWorkflowService
 from crypto_threshold.services.paper_ledger_service import PaperLedgerService
 from crypto_threshold.services.schema_drift_service import ExternalPayloadSchemaMonitor
-from crypto_threshold.services.settlement_service import SettlementService
+from crypto_threshold.services.settlement_service import (
+    SettlementBatchError,
+    SettlementService,
+)
 from crypto_threshold.services.stream_research_service import StreamResearchCoordinator
 from crypto_threshold.storage.repositories import Repository
 
@@ -193,6 +196,10 @@ class ShadowMonitorService:
             if self.settlement is not None:
                 try:
                     self.settlement.settle_due(limit=self.analysis_limit)
+                except SettlementBatchError as exc:
+                    reasons.extend(
+                        f"settlement_error:{reason}" for reason in exc.reasons
+                    )
                 except Exception as exc:
                     reasons.append(f"settlement_error:{type(exc).__name__}")
             self.paper.settle_open()

@@ -24,10 +24,25 @@ from crypto_threshold.storage.repositories import Repository
 SETTLEMENT_SOURCE_VERSION = "binance-settlement-v1"
 CHAINLINK_SETTLEMENT_SOURCE_VERSION = "chainlink-gamma-settlement-v1"
 GAMMA_EVENT_SOURCE_VERSION = "gamma-event-v1"
+PENDING_BACKOFF = (
+    timedelta(minutes=5),
+    timedelta(minutes=15),
+    timedelta(hours=1),
+    timedelta(hours=6),
+)
+ERROR_BACKOFF = timedelta(hours=1)
 
 
 class SettlementPendingError(ValueError):
     """The authoritative public resolution payload is not complete yet."""
+
+
+class SettlementBatchError(RuntimeError):
+    """One or more settlement candidates failed after the batch was drained."""
+
+    def __init__(self, reasons: tuple[str, ...]) -> None:
+        self.reasons = reasons
+        super().__init__("; ".join(reasons))
 
 
 class SettlementService:
@@ -52,18 +67,60 @@ class SettlementService:
             ready_before=now - timedelta(minutes=1), limit=limit
         )
         labels: list[SettlementLabel] = []
+        errors: list[str] = []
         for row in rows:
             try:
-                labels.append(self._settle_rule(row, now=now))
+                labels.append(self._settle_with_attempt(row, now=now))
             except SettlementPendingError:
                 continue
+            except Exception as exc:
+                errors.append(f"{row['market_id']}:{type(exc).__name__}")
+        if errors:
+            raise SettlementBatchError(tuple(errors))
         return tuple(labels)
 
     def settle_market(self, market_id: str) -> SettlementLabel:
         row = self.repository.get_resolution_rule(market_id)
         if row is None:
             raise ValueError(f"missing resolution rule for market: {market_id}")
-        return self._settle_rule(row, now=_utc(self.clock()))
+        return self._settle_with_attempt(row, now=_utc(self.clock()))
+
+    def _settle_with_attempt(self, row: Row, *, now: datetime) -> SettlementLabel:
+        market_id = str(row["market_id"])
+        attempt_count = self.repository.start_settlement_attempt(
+            market_id=market_id,
+            target_time_utc=_required_time(row, "target_time_utc"),
+            contract_family=str(row["contract_family"] or DAILY_THRESHOLD_FAMILY),
+            attempted_at=now,
+        )
+        try:
+            label = self._settle_rule(row, now=now)
+        except SettlementPendingError as exc:
+            self.repository.finish_settlement_attempt(
+                market_id=market_id,
+                status="pending",
+                next_attempt_at=now + _pending_delay(attempt_count),
+                reason=_short_reason(exc),
+                updated_at=now,
+            )
+            raise
+        except Exception as exc:
+            self.repository.finish_settlement_attempt(
+                market_id=market_id,
+                status="error",
+                next_attempt_at=now + ERROR_BACKOFF,
+                reason=_short_reason(exc),
+                updated_at=now,
+            )
+            raise
+        self.repository.finish_settlement_attempt(
+            market_id=market_id,
+            status="succeeded",
+            next_attempt_at=now,
+            reason=None,
+            updated_at=now,
+        )
+        return label
 
     def _settle_rule(self, row: Row, *, now: datetime) -> SettlementLabel:
         family = str(row["contract_family"] or DAILY_THRESHOLD_FAMILY)
@@ -148,7 +205,12 @@ class SettlementService:
 
         event = self.client.get_event(event_id)
         received_at = _utc(self.clock())
-        payload_id = self.repository.record_external_payload(
+        resolved_market = _event_market(
+            event,
+            market_id=market_id,
+            condition_id=str(row["condition_id"] or ""),
+        )
+        payload_id, _ = self.repository.record_settlement_payload_if_changed(
             market_id=market_id,
             source="gamma",
             payload_kind="chainlink_resolution_event",
@@ -156,11 +218,7 @@ class SettlementService:
             observed_at=target,
             received_at=received_at,
             source_version=GAMMA_EVENT_SOURCE_VERSION,
-        )
-        resolved_market = _event_market(
-            event,
-            market_id=market_id,
-            condition_id=str(row["condition_id"] or ""),
+            payload_fingerprint=_resolution_fingerprint(event, resolved_market),
         )
         if resolved_market is None:
             raise SettlementPendingError("market missing from Gamma resolution event")
@@ -204,6 +262,38 @@ class SettlementService:
             contract_family=SHORT_UPDOWN_FAMILY,
         )
         return self.repository.save_settlement_label(label)
+
+
+def _pending_delay(attempt_count: int) -> timedelta:
+    index = max(0, min(attempt_count - 1, len(PENDING_BACKOFF) - 1))
+    return PENDING_BACKOFF[index]
+
+
+def _short_reason(error: Exception) -> str:
+    reason = str(error).strip() or type(error).__name__
+    return reason[:240]
+
+
+def _resolution_fingerprint(
+    event: dict[str, Any],
+    market: dict[str, Any] | None,
+) -> str:
+    metadata = _mapping(
+        event.get("eventMetadata")
+        or (market or {}).get("eventMetadata")
+        or event.get("metadata")
+    )
+    projection = {
+        "event_closed": event.get("closed"),
+        "market_id": (market or {}).get("id"),
+        "condition_id": (market or {}).get("conditionId"),
+        "market_closed": (market or {}).get("closed"),
+        "price_to_beat": metadata.get("priceToBeat"),
+        "final_price": metadata.get("finalPrice"),
+        "outcomes": _listish((market or {}).get("outcomes")),
+        "outcome_prices": _listish((market or {}).get("outcomePrices")),
+    }
+    return json.dumps(projection, default=str, sort_keys=True, separators=(",", ":"))
 
 
 def _require_daily_contract(row: Row) -> None:

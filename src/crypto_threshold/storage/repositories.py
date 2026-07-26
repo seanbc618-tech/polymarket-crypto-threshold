@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from contextlib import closing
 from datetime import UTC, datetime
@@ -129,6 +130,208 @@ class Repository:
             if cursor.lastrowid is None:
                 raise RuntimeError("external payload insert did not return an id")
             return int(cursor.lastrowid)
+
+    def start_settlement_attempt(
+        self,
+        *,
+        market_id: str,
+        target_time_utc: datetime,
+        contract_family: str,
+        attempted_at: datetime,
+    ) -> int:
+        """Begin one durable settlement attempt and return its ordinal."""
+        attempted = _iso(attempted_at)
+        target = _iso(target_time_utc)
+        if attempted is None or target is None:
+            raise ValueError("settlement attempt timestamps are required")
+        with self.database.transaction() as connection:
+            row = connection.execute(
+                """
+                SELECT attempt_count
+                FROM settlement_attempts
+                WHERE market_id = ?
+                """,
+                (market_id,),
+            ).fetchone()
+            attempt_count = int(row["attempt_count"]) + 1 if row else 1
+            if row:
+                connection.execute(
+                    """
+                    UPDATE settlement_attempts
+                    SET target_time_utc = ?,
+                        contract_family = ?,
+                        attempt_count = ?,
+                        last_attempt_at = ?,
+                        next_attempt_at = ?,
+                        last_status = 'in_progress',
+                        last_reason = NULL,
+                        updated_at = ?
+                    WHERE market_id = ?
+                    """,
+                    (
+                        target,
+                        contract_family,
+                        attempt_count,
+                        attempted,
+                        attempted,
+                        attempted,
+                        market_id,
+                    ),
+                )
+            else:
+                connection.execute(
+                    """
+                    INSERT INTO settlement_attempts (
+                        market_id, target_time_utc, contract_family,
+                        attempt_count, last_attempt_at, next_attempt_at,
+                        last_status, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, 'in_progress', ?)
+                    """,
+                    (
+                        market_id,
+                        target,
+                        contract_family,
+                        attempt_count,
+                        attempted,
+                        attempted,
+                        attempted,
+                    ),
+                )
+        return attempt_count
+
+    def record_settlement_payload_if_changed(
+        self,
+        *,
+        market_id: str,
+        source: str,
+        payload_kind: str,
+        payload: Any,
+        observed_at: datetime | None,
+        received_at: datetime,
+        source_version: str,
+        payload_fingerprint: str | None = None,
+    ) -> tuple[int, bool]:
+        """Persist a resolution payload only when its settlement meaning changes."""
+        encoded = _json(payload)
+        fingerprint_source = payload_fingerprint or encoded
+        payload_hash = hashlib.sha256(fingerprint_source.encode("utf-8")).hexdigest()
+        with self.database.transaction() as connection:
+            attempt = connection.execute(
+                """
+                SELECT last_payload_id, last_payload_hash
+                FROM settlement_attempts
+                WHERE market_id = ?
+                """,
+                (market_id,),
+            ).fetchone()
+            if attempt is None:
+                raise RuntimeError("settlement attempt must start before payload capture")
+
+            previous_id = attempt["last_payload_id"]
+            if (
+                previous_id is not None
+                and attempt["last_payload_hash"] == payload_hash
+            ):
+                return int(previous_id), False
+
+            # Reconcile state created before schema v5 with its latest full
+            # payload before deciding that a new raw body must be stored.
+            if previous_id is None or attempt["last_payload_hash"] is None:
+                previous = connection.execute(
+                    """
+                    SELECT id, raw_payload
+                    FROM external_payloads
+                    WHERE market_id = ?
+                      AND source = ?
+                      AND payload_kind = ?
+                      AND source_version = ?
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """,
+                    (market_id, source, payload_kind, source_version),
+                ).fetchone()
+                if previous is not None and previous["raw_payload"] == encoded:
+                    connection.execute(
+                        """
+                        UPDATE settlement_attempts
+                        SET last_payload_id = ?,
+                            last_payload_hash = ?,
+                            updated_at = ?
+                        WHERE market_id = ?
+                        """,
+                        (
+                            int(previous["id"]),
+                            payload_hash,
+                            _iso(received_at),
+                            market_id,
+                        ),
+                    )
+                    return int(previous["id"]), False
+
+            cursor = connection.execute(
+                """
+                INSERT INTO external_payloads (
+                    market_id, source, payload_kind, observed_at,
+                    received_at, source_version, raw_payload
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    market_id,
+                    source,
+                    payload_kind,
+                    _iso(observed_at),
+                    _iso(received_at),
+                    source_version,
+                    encoded,
+                ),
+            )
+            if cursor.lastrowid is None:
+                raise RuntimeError("settlement payload insert did not return an id")
+            payload_id = int(cursor.lastrowid)
+            connection.execute(
+                """
+                UPDATE settlement_attempts
+                SET last_payload_id = ?,
+                    last_payload_hash = ?,
+                    updated_at = ?
+                WHERE market_id = ?
+                """,
+                (payload_id, payload_hash, _iso(received_at), market_id),
+            )
+            return payload_id, True
+
+    def finish_settlement_attempt(
+        self,
+        *,
+        market_id: str,
+        status: str,
+        next_attempt_at: datetime,
+        reason: str | None,
+        updated_at: datetime,
+    ) -> None:
+        """Persist the result and next eligible time for one attempt."""
+        if status not in {"pending", "succeeded", "error"}:
+            raise ValueError(f"unsupported settlement attempt status: {status}")
+        with self.database.transaction() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE settlement_attempts
+                SET next_attempt_at = ?,
+                    last_status = ?,
+                    last_reason = ?,
+                    updated_at = ?
+                WHERE market_id = ?
+                """,
+                (
+                    _iso(next_attempt_at),
+                    status,
+                    reason,
+                    _iso(updated_at),
+                    market_id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError("settlement attempt state was not persisted")
 
     def save_resolution_rule(
         self,
@@ -516,6 +719,8 @@ class Repository:
                     LEFT JOIN settlement_labels AS l
                       ON l.market_id = m.market_id
                      AND l.target_time_utc = r.target_time_utc
+                    LEFT JOIN settlement_attempts AS a
+                      ON a.market_id = m.market_id
                     WHERE (
                         r.tradable = 1
                         OR EXISTS (
@@ -539,10 +744,18 @@ class Repository:
                       AND r.target_time_utc IS NOT NULL
                       AND r.target_time_utc <= ?
                       AND l.label_id IS NULL
-                    ORDER BY r.target_time_utc, m.market_id
+                      AND (
+                          a.next_attempt_at IS NULL
+                          OR a.next_attempt_at <= ?
+                      )
+                    ORDER BY
+                        CASE WHEN a.market_id IS NULL THEN 0 ELSE 1 END,
+                        COALESCE(a.next_attempt_at, r.target_time_utc),
+                        r.target_time_utc,
+                        m.market_id
                     LIMIT ?
                     """,
-                    (_iso(ready_before), limit),
+                    (_iso(ready_before), _iso(ready_before), limit),
                 )
             )
 
@@ -1100,6 +1313,7 @@ class Repository:
             "analysis_signals",
             "analysis_signal_inputs",
             "settlement_labels",
+            "settlement_attempts",
             "replay_datasets",
             "replay_items",
             "calibration_runs",

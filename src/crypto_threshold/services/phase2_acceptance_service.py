@@ -42,6 +42,7 @@ REQUIRED_TABLES = frozenset(
         "analysis_signals",
         "analysis_signal_inputs",
         "settlement_labels",
+        "settlement_attempts",
         "replay_datasets",
         "replay_items",
         "calibration_runs",

@@ -7,7 +7,7 @@ from contextlib import closing, contextmanager
 from pathlib import Path
 from sqlite3 import Connection, Row, complete_statement, connect
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -239,6 +239,22 @@ CREATE TABLE IF NOT EXISTS settlement_labels (
     UNIQUE (market_id, target_time_utc, source_version)
 );
 
+CREATE TABLE IF NOT EXISTS settlement_attempts (
+    market_id TEXT PRIMARY KEY REFERENCES markets(market_id),
+    target_time_utc TEXT NOT NULL,
+    contract_family TEXT NOT NULL,
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    last_attempt_at TEXT,
+    next_attempt_at TEXT,
+    last_payload_id INTEGER REFERENCES external_payloads(id),
+    last_payload_hash TEXT,
+    last_status TEXT NOT NULL DEFAULT 'never'
+        CHECK (last_status IN ('never', 'in_progress', 'pending', 'succeeded', 'error')),
+    last_reason TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE IF NOT EXISTS replay_datasets (
     dataset_id TEXT PRIMARY KEY,
     name TEXT NOT NULL UNIQUE,
@@ -398,6 +414,9 @@ ON analysis_signal_inputs(payload_id);
 
 CREATE INDEX IF NOT EXISTS idx_settlement_labels_market
 ON settlement_labels(market_id, target_time_utc);
+
+CREATE INDEX IF NOT EXISTS idx_settlement_attempts_due
+ON settlement_attempts(next_attempt_at, target_time_utc, market_id);
 
 CREATE INDEX IF NOT EXISTS idx_replay_items_dataset_order
 ON replay_items(dataset_id, ordinal);
