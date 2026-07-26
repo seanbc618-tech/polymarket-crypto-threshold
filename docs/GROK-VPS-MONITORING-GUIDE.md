@@ -1,6 +1,6 @@
 # Grok VPS Read-Only Monitoring Guide
 
-**Updated:** 2026-07-25
+**Updated:** 2026-07-26
 
 **Scope:** Observe the Crypto Threshold VPS only. Do not operate the weather
 project, deploy code, repair services, or change evidence.
@@ -39,7 +39,7 @@ do not attempt a fix. Return the report using the guide's fixed template.
 | Up/Down service | `crypto-threshold-updown-shadow.service` |
 | Up/Down DB | `/opt/polymarket-crypto-threshold/data/updown-shadow.db` |
 | Up/Down backup timer | `crypto-threshold-updown-backup.timer` |
-| Current deployment baseline | `f4f0424` |
+| Current deployment baseline | `b8e69d2` |
 
 The daily service is a bounded 73-hour evidence run. It began on
 2026-07-24 and is expected to exit normally around 2026-07-27 14:40 CST.
@@ -108,7 +108,7 @@ cat /opt/polymarket-crypto-threshold/.deployed-commit
 Expected:
 
 - NTP prints `yes`.
-- The deployment marker is `f4f0424`, unless
+- The deployment marker is `b8e69d2`, unless
   `docs/PROJECT-STATUS.md` records a newer reviewed deployment.
 
 Do not change a mismatched marker.
@@ -208,6 +208,15 @@ def fetchall(connection: sqlite3.Connection, sql: str):
     return [tuple(row) for row in connection.execute(sql)]
 
 
+def as_utc(value):
+    if not value:
+        return None
+    parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
 for label, path in DATABASES.items():
     print(f"\n=== {label}: {path} ===")
     if not path.is_file():
@@ -293,6 +302,52 @@ for label, path in DATABASES.items():
         ).fetchone()[0])
 
         if label == "updown":
+            if "settlement_attempts" not in tables:
+                print("settlement_attempts", "MISSING")
+            else:
+                attempt_rows = fetchall(
+                    connection,
+                    """
+                    SELECT last_status, next_attempt_at
+                    FROM settlement_attempts
+                    """,
+                )
+                now = datetime.now(UTC)
+                due_count = sum(
+                    1
+                    for _, next_attempt_at in attempt_rows
+                    if next_attempt_at and as_utc(next_attempt_at) <= now
+                )
+                print("settlement_attempt_statuses", fetchall(
+                    connection,
+                    """
+                    SELECT last_status, COUNT(*)
+                    FROM settlement_attempts
+                    GROUP BY last_status
+                    ORDER BY last_status
+                    """,
+                ))
+                print("settlement_attempt_due_count", due_count)
+                print("resolution_payload_summary", fetchall(
+                    connection,
+                    """
+                    SELECT payload_kind, COUNT(*), MAX(id), MAX(received_at)
+                    FROM external_payloads
+                    WHERE payload_kind = 'chainlink_resolution_event'
+                    GROUP BY payload_kind
+                    """,
+                ))
+                print("top_resolution_payload_markets", fetchall(
+                    connection,
+                    """
+                    SELECT market_id, COUNT(*), MAX(id), MAX(received_at)
+                    FROM external_payloads
+                    WHERE payload_kind = 'chainlink_resolution_event'
+                    GROUP BY market_id
+                    ORDER BY COUNT(*) DESC
+                    LIMIT 5
+                    """,
+                ))
             print("latest_14_interval_status", fetchall(
                 connection,
                 """
@@ -362,6 +417,15 @@ Additional interpretation:
   `analysis_signals` is valid and must not be rejected because it contains the
   substring `sign`.
 - Up/Down `boundary_mismatch` and `outcome_mismatch` must both be zero.
+- On schema v5, Up/Down must report `settlement_attempts` rather than
+  `MISSING`. Pending attempts are acceptable when their retry time is in the
+  future; a growing `settlement_attempt_due_count` is WARN and needs owner
+  review.
+- `resolution_payload_summary` and `top_resolution_payload_markets` are
+  cursors for comparing checks. Live books and ticks may grow the overall
+  payload table. A market's resolution payload count or max ID should not
+  advance merely because Gamma returned the same settlement meaning. Existing
+  historical duplicates are evidence, not a reason to delete rows.
 - After warm-up, the latest 14 Up/Down rows normally contain seven 5m and seven
   15m signals. A single stale/rejected asset is WARN, not proof of a broken
   service.
@@ -393,12 +457,9 @@ sudo -u crypto-threshold \
 ```
 
 ```bash
-sudo -u crypto-threshold \
-  find /opt/polymarket-crypto-threshold/backups \
-  -maxdepth 2 \
-  -type f \
-  -name "*.partial*" \
-  -print
+sudo -u crypto-threshold sh -c \
+  'cd /opt/polymarket-crypto-threshold && \
+   find backups -maxdepth 2 -type f -name "*.partial*" -print'
 ```
 
 Expected:
@@ -479,6 +540,9 @@ Up/Down service
 - Signal status counts:
 - Paper status counts:
 - Settlement label count:
+- Settlement attempt statuses:
+- Settlement attempt due count:
+- Resolution payload summary/cursor:
 - Boundary mismatch:
 - Outcome mismatch:
 

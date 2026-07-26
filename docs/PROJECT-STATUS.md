@@ -1,6 +1,6 @@
 # Project Status
 
-**Date:** 2026-07-25
+**Date:** 2026-07-26
 
 **Classification:** Research prototype
 
@@ -33,6 +33,15 @@ research only and does not make Phase 2 accepted. The independent
 `crypto-threshold-updown-shadow.service` has now been deployed on the
 direct-connect VPS against
 `/opt/polymarket-crypto-threshold/data/updown-shadow.db`.
+
+On 2026-07-26, the Up/Down service was briefly restarted with explicit owner
+approval to activate commit `b8e69d2`. The migration advanced its database to
+schema v5 and added durable per-market settlement attempt state. The daily
+service was not restarted and retained PID `49268`. Post-restart cycles
+confirmed that 14 incomplete older markets were placed on a future retry
+schedule while 14 later markets were processed, avoiding FIFO head-of-line
+starvation. This is an operational correctness fix, not Phase 2 acceptance
+evidence.
 
 No order signer, authenticated trading client, BUY/SELL method, cancellation
 path, or position mutation exists in the runtime. Setting
@@ -100,6 +109,15 @@ path, or position mutation exists in the runtime. Setting
   authoritative settlement boundary before entering replay.
 - Versioned SQLite initialization/migration, foreign keys, WAL, transactions,
   source/model versions, and observed/received timestamps.
+- Schema v5 durable settlement scheduling records each market's attempt count,
+  status, next eligible retry, reason, and last resolution payload. Pending
+  resolutions use bounded backoff (`5m`, `15m`, `1h`, `6h`); isolated errors
+  use a one-hour retry. Candidate selection is due-time ordered so one
+  incomplete market cannot starve later markets.
+- Settlement resolution payloads use a settlement-semantic fingerprint before
+  insertion. Repeated Gamma bodies do not create new `external_payloads` rows;
+  existing historical duplicates are retained for audit and are not compacted
+  by this fix.
 - Fail-closed `doctor` checks for DB, providers, HTTPS URLs, and trading mode.
 - Optional official-SDK `PolymarketStreamBridge` with coalesced bounded queues,
   idempotent lifecycle, token freshness, reconnect/resubscribe, REST backfill,
@@ -342,6 +360,20 @@ project review and never authorizes live capital or Phase 3 trading work.
   and clean schema-drift evidence. Its mechanical report is correctly
   `PENDING/NOT ACCEPTED`: closed-tick evidence now passes, while replay,
   calibration, 72-hour coverage, and reconnect remain pending.
+- On 2026-07-26 after activating `b8e69d2`, the Up/Down VPS process remained
+  `active/running` at PID `115221` with zero restarts, while the daily process
+  remained PID `49268` with zero restarts. The Up/Down database reported
+  schema v5, 70 settlement attempts (`28 pending`, `42 succeeded`), zero
+  currently due retries, and four consecutive `complete_rest_fallback`
+  cycles during the first observation window.
+- The known incomplete market `3078822` remained at 1,345
+  `chainlink_resolution_event` payload rows with last ID `184505` and last
+  receipt `2026-07-26T13:12:45Z` throughout the post-activation observation.
+  Overall payload growth continued for legitimate live books and price ticks,
+  but this resolution payload did not grow from repeated unchanged responses.
+- The service remains public, read-only, and shadow-only: no signer,
+  authenticated reconciliation, BUY/SELL, order, fill, or position mutation
+  was executed during activation or verification.
 - `crypto-threshold-backup.timer` is active. A manual WAL-consistent backup
   completed with `PRAGMA integrity_check=ok`; source and backup contained no
   order/fill/position/signer/reconciliation tables.
@@ -365,6 +397,10 @@ project review and never authorizes live capital or Phase 3 trading work.
 - A fresh short-Up/Down process also needs the configured trailing volatility
   history before it can analyze a boundary; warm-up rejections are persisted
   and cannot be treated as market/model failures.
+- Schema v5 prevents new duplicate resolution rows for unchanged settlement
+  meaning, but it does not remove the large historical duplicate payload
+  backlog. Missing `finalPrice` remains a legitimate pending state and cannot
+  be converted into a label by the scheduler.
 - Gamma's 5m/15m discovery metadata can report misleading recurrence values;
   discovery therefore verifies series slug and exact window duration.
 - Stream Market Channel data is BBO-only acceleration, not L2 executable depth;
@@ -398,6 +434,12 @@ In parallel, keep the short-Up/Down evidence in its separate database. Compare
 captured starts with Gamma's eventual `priceToBeat`, settle all seven assets,
 then build and verify a `short_updown` replay before interpreting any paper
 result. Do not merge this evidence into the daily Phase 2 acceptance run.
+
+For ongoing VPS observation, check `settlement_attempts` in the Up/Down
+database. A pending row is healthy when its `next_attempt_at` is in the
+future; a growing due backlog, repeated attempt errors, or resolution payload
+IDs advancing for an unchanged semantic response requires review. The
+monitoring guide is read-only and must not repair or compact the backlog.
 
 After the formal daily VPS monitor is stopped, backed up, and reviewed, remind
 the operator that the old local smoke history can be deleted. Do not delete it
