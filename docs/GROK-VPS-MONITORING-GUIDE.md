@@ -110,6 +110,8 @@ Expected:
 - NTP prints `yes`.
 - The deployment marker is `8866fb2`, unless
   `docs/PROJECT-STATUS.md` records a newer reviewed deployment.
+- `Observed at` in the final report must be the read-window end, not the time
+  the SSH session or first command started.
 
 Do not change a mismatched marker.
 
@@ -551,6 +553,8 @@ Expected:
   absolute path, distinguish daily root from `backups/updown`, and do not
   delete it.
 - A missing scheduled backup or a backup older than 26 hours is WARN.
+- Report each backup's age at the read-window end and the 26-hour threshold.
+  Do not estimate age from a filename while using an earlier observation time.
 
 Do not manually start a backup service. Backup creation is a mutation and is
 reserved for the owner/Codex.
@@ -642,6 +646,7 @@ Backups
 - Daily timer:
 - Up/Down timer:
 - Latest backup timestamps:
+- Backup age at read-window end / threshold:
 - Partial files:
 
 Errors and anomalies
