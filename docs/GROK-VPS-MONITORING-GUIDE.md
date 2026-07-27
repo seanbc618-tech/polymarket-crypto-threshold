@@ -1,6 +1,6 @@
 # Grok VPS Read-Only Monitoring Guide
 
-**Updated:** 2026-07-26
+**Updated:** 2026-07-27
 
 **Scope:** Observe the Crypto Threshold VPS only. Do not operate the weather
 project, deploy code, repair services, or change evidence.
@@ -398,7 +398,21 @@ for label, path in DATABASES.items():
             ))
             boundary_mismatch = connection.execute(
                 """
-                SELECT COUNT(*)
+                SELECT
+                    COUNT(*) AS signal_rows,
+                    COUNT(DISTINCT s.market_id) AS market_count,
+                    MAX(
+                        CASE
+                            WHEN ABS(CAST(l.strike AS REAL)) > 0.000000001
+                            THEN ABS(
+                                (
+                                    CAST(s.threshold AS REAL)
+                                    - CAST(l.strike AS REAL)
+                                ) / CAST(l.strike AS REAL)
+                            ) * 1000000.0
+                            ELSE NULL
+                        END
+                    ) AS max_relative_ppm
                 FROM analysis_signals AS s
                 JOIN settlement_labels AS l
                   ON l.market_id = s.market_id
@@ -406,7 +420,28 @@ for label, path in DATABASES.items():
                     CAST(s.threshold AS REAL) - CAST(l.strike AS REAL)
                 ) > 0.000000001
                 """
-            ).fetchone()[0]
+            ).fetchone()
+            boundary_distribution = fetchall(
+                connection,
+                """
+                SELECT
+                    s.asset,
+                    r.candle_interval,
+                    s.status,
+                    COUNT(*) AS signal_rows,
+                    COUNT(DISTINCT s.market_id) AS market_count
+                FROM analysis_signals AS s
+                JOIN settlement_labels AS l
+                  ON l.market_id = s.market_id
+                JOIN resolution_rules AS r
+                  ON r.market_id = s.market_id
+                WHERE ABS(
+                    CAST(s.threshold AS REAL) - CAST(l.strike AS REAL)
+                ) > 0.000000001
+                GROUP BY s.asset, r.candle_interval, s.status
+                ORDER BY s.asset, r.candle_interval, s.status
+                """,
+            )
             outcome_mismatch = connection.execute(
                 """
                 SELECT COUNT(*)
@@ -424,7 +459,18 @@ for label, path in DATABASES.items():
                 END
                 """
             ).fetchone()[0]
-            print("boundary_mismatch", boundary_mismatch)
+            print("boundary_mismatch", boundary_mismatch[0])
+            print("boundary_mismatch_signal_rows", boundary_mismatch[0])
+            print("boundary_mismatch_market_count", boundary_mismatch[1])
+            print(
+                "boundary_mismatch_max_relative_ppm",
+                (
+                    round(boundary_mismatch[2], 6)
+                    if boundary_mismatch[2] is not None
+                    else None
+                ),
+            )
+            print("boundary_mismatch_distribution", boundary_distribution)
             print("outcome_mismatch", outcome_mismatch)
         read_finished_at = datetime.now(UTC)
         print("read_window", read_started_at.isoformat(), read_finished_at.isoformat())
@@ -482,7 +528,14 @@ Additional interpretation:
 - `forbidden_tables` must be `[]`. Match exact table names only.
   `analysis_signals` is valid and must not be rejected because it contains the
   substring `sign`.
-- Up/Down `boundary_mismatch` and `outcome_mismatch` must both be zero.
+- Up/Down `boundary_mismatch_signal_rows`,
+  `boundary_mismatch_market_count`, and `outcome_mismatch` must all be zero.
+  Repeated analysis of one market can produce many mismatched signal rows, so
+  always report both signal-row and unique-market counts; do not describe the
+  signal-row count as a market count. Also report the asset/interval/status
+  distribution and maximum relative ppm. Any unique mismatch remains FAIL for
+  the separate short-Up/Down replay path; do not weaken the exact comparison,
+  relabel the sample, or merge this result into the daily evidence database.
 - On schema v5, Up/Down must report `settlement_attempts` rather than
   `MISSING`. The due count includes only `pending` and `error` rows;
   succeeded rows are excluded because they should already have a label.
@@ -639,7 +692,8 @@ Up/Down service
 - In-progress rows and age:
 - Resolution payload summary/cursor:
 - Read window and snapshot consistency:
-- Boundary mismatch:
+- Boundary mismatch signal rows / unique markets:
+- Boundary mismatch distribution / maximum relative ppm:
 - Outcome mismatch:
 
 Backups

@@ -1,6 +1,6 @@
 # Project Status
 
-**Date:** 2026-07-26
+**Date:** 2026-07-27
 
 **Classification:** Research prototype
 
@@ -393,6 +393,37 @@ project review and never authorizes live capital or Phase 3 trading work.
   It is not accepted as a time-bounded evidence snapshot. The monitoring guide
   now requires a read window, one read-only transaction, process-versus-marker
   distinction, and explicit DB-history-versus-service-start comparison.
+- A later Grok snapshot at `2026-07-27T02:39:59Z` passed its read-window
+  consistency check. Both services were active with zero restarts, fresh
+  cycles, synchronized NTP, healthy scheduled backups, and no forbidden
+  trading tables. The daily database contained 10 unique settlement labels,
+  still below the required 30 prior labels. Its bounded process remains due to
+  end naturally at approximately `2026-07-27T06:39:56Z`
+  (`14:39:56 Asia/Shanghai`); it must not be restarted merely to inspect it.
+- A direct read-only acceptance evaluation at approximately
+  `2026-07-27T03:20Z` measured a 69.7679-hour database span over 1,294 cycles
+  with no oversized gap or overlong cycle. The no-trading surface,
+  REST-fallback/rejection/paper evidence, external schema-drift monitor, and
+  Binance closed-tick/reconnect evidence passed. The result remained
+  `PENDING/NOT ACCEPTED`: the original daily evidence database is schema v3
+  while the current checker expects v5 and `settlement_attempts`, and it has no
+  sealed VPS replay, complete chronological OOS calibration, or complete
+  metrics. The coverage gate also had not yet reached 72 hours at that read.
+- The Up/Down snapshot's reported `boundary_mismatch=83` means 83 repeated
+  signal rows across nine unique settled markets, not 83 markets. The rows
+  comprise 65 analyzed and 18 rejected decisions across BNB, DOGE, ETH, HYPE,
+  SOL, and XRP 5m/15m contracts. For each affected market, the persisted
+  boundary input was a live Chainlink tick approximately one second after the
+  exact window boundary; Gamma's authoritative `priceToBeat` differed by up to
+  106.612262 ppm. Strict replay exclusion is therefore working as designed and
+  must not be relaxed to make the check pass. This is a real short-Up/Down
+  settlement-source alignment failure, but it does not retroactively merge
+  into or invalidate the separate daily Phase 2 database.
+- The same Grok snapshot saw all seven latest 5m signals rejected while all
+  seven 15m signals were analyzed. A later read-only check found seven analyzed
+  signals for each interval without a restart, so that pattern was transient
+  rather than a process failure. The growing Up/Down settlement retry backlog
+  remains a separate capacity warning.
 - `crypto-threshold-backup.timer` is active. A manual WAL-consistent backup
   completed with `PRAGMA integrity_check=ok`; source and backup contained no
   order/fill/position/signer/reconciliation tables.
@@ -408,9 +439,12 @@ project review and never authorizes live capital or Phase 3 trading work.
 - Gamma search is relevance-based and is not a completeness guarantee.
 - Public REST snapshots are not atomic across providers.
 - The Chainlink RTDS start tick must be compared with Gamma's eventual
-  `priceToBeat` over real closed windows. Any mismatch excludes that signal
-  from replay; enough forward evidence has not yet accumulated to characterize
-  this risk.
+  `priceToBeat` over real closed windows. Nine settled markets have now shown
+  that a live tick accepted at boundary plus approximately one second can
+  differ from the authoritative value, with an observed maximum of 106.612262
+  ppm. Any mismatch excludes that signal from replay. The capture or
+  authoritative-boundary retrieval design must be corrected before the
+  short-Up/Down replay can be accepted; tolerance widening is not a valid fix.
 - A process started or reconnected after a 5m/15m boundary cannot reconstruct
   the beginning value from the live stream and rejects that active window.
 - A fresh short-Up/Down process also needs the configured trailing volatility
@@ -442,21 +476,27 @@ project review and never authorizes live capital or Phase 3 trading work.
 
 ## Next Gate
 
-Collect forward decisions for new daily contracts, settle them after their
-authoritative Binance candle closes, and rebuild replay until at least 30 unique
-prior labels exist. Then collect and settle a later decision batch for the
-independent OOS window and publish calibration metrics. Repeating the five-hour
-local smoke is unnecessary. Keep the active VPS monitor uninterrupted, verify
-its daily backup and cycle-gap health, capture reconnect evidence, and run the
-mechanical acceptance checker after at least 72 persisted hours. Continue
-settling new daily contracts and rebuild replay/calibration when enough unique
-labels exist. Live order placement remains explicitly outside this phase and
-requires a separate design and approval.
+Let the bounded daily process finish naturally at approximately
+`2026-07-27T06:39:56Z`, then perform the final read-only service, cycle-gap, and
+acceptance review. Preserve the original schema-v3 database and its hash; do
+not migrate or rewrite the only evidence artifact in place. Review the
+schema-v3/v5 checker mismatch on an immutable backup or copy before deciding
+whether acceptance needs a compatibility path or a migrated derived artifact.
+The elapsed-time gate alone will not accept Phase 2.
 
-In parallel, keep the short-Up/Down evidence in its separate database. Compare
-captured starts with Gamma's eventual `priceToBeat`, settle all seven assets,
-then build and verify a `short_updown` replay before interpreting any paper
-result. Do not merge this evidence into the daily Phase 2 acceptance run.
+Continue collecting forward decisions for new daily contracts, settle them
+after their authoritative Binance candle closes, and rebuild replay until at
+least 30 unique prior labels exist. Then collect and settle a later decision
+batch for the independent OOS window and publish calibration metrics.
+Repeating the five-hour local smoke is unnecessary. Live order placement
+remains explicitly outside this phase and requires a separate design and
+approval.
+
+In parallel, keep the short-Up/Down evidence in its separate database. Resolve
+the one-second live-boundary versus authoritative `priceToBeat` mismatch
+without weakening replay equality, then build and verify a `short_updown`
+replay before interpreting any paper result. Do not merge this evidence into
+the daily Phase 2 acceptance run.
 
 For ongoing VPS observation, check `settlement_attempts` in the Up/Down
 database. A pending row is healthy when its `next_attempt_at` is in the
