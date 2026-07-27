@@ -163,12 +163,16 @@ path, or position mutation exists in the runtime. Setting
 - Immutable replay manifests hash model features and exact input payloads.
   SQLite triggers prevent mutation of settlement labels, sealed datasets, and
   replay items. Empty datasets explicitly fail replay acceptance.
-- Chronological walk-forward histogram calibration v2 uses only labels
-  available before each test decision and deterministically selects the latest
-  pre-deadline snapshot for each unique settlement label. Repeated snapshots
-  remain in replay for audit but cannot impersonate independent training labels.
-  Reports include Brier score, log loss, and ECE for raw, calibrated, and
-  Polymarket midpoint-baseline probabilities.
+- Replay manifest v3 can freeze the earliest N eligible labels and bind a later
+  combined replay to that exact training dataset, manifest hash, label list,
+  cutoff, and item identities. Dataset hashes now include each item's
+  `decision_at` and `label_available_at`; verification remains compatible with
+  legacy v1/v2 manifests. Fixed-holdout calibration v3 reads training samples
+  only from the frozen replay. Later OOS labels are evaluated only after every
+  frozen training label was strictly available and are never added back into
+  the histogram. Repeated snapshots remain in replay for audit but cannot
+  impersonate independent labels. Reports include Brier score, log loss, and
+  ECE for raw, calibrated, and Polymarket midpoint-baseline probabilities.
 - A persistent paper ledger records every hypothetical enter/skip decision,
   deduplicates by signal/policy, prevents a second open entry for one market,
   and settles only from persisted Binance labels.
@@ -250,7 +254,7 @@ Software implementation is complete for the following path:
 
 ```text
 exact raw inputs -> Binance settlement label -> immutable replay
--> leakage-safe walk-forward calibration -> stream-triggered REST shadow
+-> frozen-training OOS calibration -> stream-triggered REST shadow
 -> persistent paper ledger
 ```
 
@@ -526,14 +530,24 @@ project review and never authorizes live capital or Phase 3 trading work.
   signal snapshots. Six historical labels had no eligible analyzed decision
   and cannot be counted or fabricated into training evidence. No replay was
   created during this audit.
-- Replay manifest v2 adds a fail-closed training selection boundary.
+- Replay manifest v3 retains the v2 fail-closed training selection boundary
+  and binds replay-item decision/label-availability timestamps into the dataset
+  hash.
   `replay-plan --db <snapshot-or-source.db> --training-label-count 30` performs
   the exact candidate/input validation through a read-only SQLite connection
   and returns `PENDING` without writes until 30 eligible unique labels exist.
   `replay-build --training-label-count 30` then selects the earliest labels by
   `(label_received_at, label_id)`, persists the exact label list and cutoff in
   the immutable manifest, and refuses to seal anything when fewer than 30 are
-  eligible. Offline verification also validates the v2 selection metadata.
+  eligible. Offline verification validates v2/v3 selection metadata and keeps
+  legacy manifest compatibility.
+- A later combined replay must be built with
+  `replay-build --training-dataset <frozen-dataset>`. The combined manifest
+  binds the frozen dataset hash, labels, cutoff, and exact item identities.
+  Calibration v3 refuses an unbound replay and keeps the frozen histogram
+  unchanged across every OOS label. Mechanical Phase 2 acceptance independently
+  recomputes the fixed-window OOS count and rejects missing or invalid training
+  references.
 - Commit `4f34b8f` passed `235` tests, Ruff, mypy over 53 source files, and
   `git diff --check`, then was deployed as the VPS filesystem marker without
   restarting Forward or Up/Down. Their PIDs remained `132082` and `136544`,

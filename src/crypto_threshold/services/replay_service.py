@@ -18,7 +18,12 @@ from crypto_threshold.domain.research import (
 from crypto_threshold.domain.rules import DAILY_THRESHOLD_FAMILY, SHORT_UPDOWN_FAMILY
 from crypto_threshold.storage.repositories import Repository
 
-REPLAY_SOURCE_VERSION = "replay-manifest-v2"
+REPLAY_SOURCE_VERSION = "replay-manifest-v3"
+SELECTION_REPLAY_SOURCE_VERSIONS = {
+    "replay-manifest-v2",
+    REPLAY_SOURCE_VERSION,
+}
+TIMESTAMP_BOUND_REPLAY_SOURCE_VERSIONS = {REPLAY_SOURCE_VERSION}
 DAILY_REQUIRED_INPUT_ROLES = {
     "market",
     "yes_book",
@@ -59,9 +64,14 @@ class ReplayService:
         *,
         contract_family: str = DAILY_THRESHOLD_FAMILY,
         training_label_count: int | None = None,
+        training_dataset: str | None = None,
     ) -> ReplayBuildResult:
         if not name.strip():
             raise ValueError("replay dataset name is required")
+        if training_label_count is not None and training_dataset is not None:
+            raise ValueError(
+                "training label count and training dataset are mutually exclusive"
+            )
         _validate_training_label_count(training_label_count)
         required_roles = _required_roles(contract_family)
         candidate_items, rejected = self._eligible_candidates(
@@ -69,6 +79,11 @@ class ReplayService:
             required_roles=required_roles,
         )
         eligible_labels = _label_entries(candidate_items)
+        training_reference = (
+            self._training_reference(training_dataset, candidate_items)
+            if training_dataset is not None
+            else None
+        )
         if (
             training_label_count is not None
             and len(eligible_labels) < training_label_count
@@ -97,10 +112,19 @@ class ReplayService:
                 for label in eligible_labels[training_label_count:]
             )
 
-        training_cutoff = (
+        selection_cutoff = (
             dict(selected_labels[-1])
             if training_label_count is not None and selected_labels
             else None
+        )
+        reported_training_cutoff = (
+            selection_cutoff
+            if selection_cutoff is not None
+            else (
+                dict(training_reference["training_cutoff"])
+                if training_reference is not None
+                else None
+            )
         )
 
         config = {
@@ -115,21 +139,18 @@ class ReplayService:
                 "requested_unique_label_count": training_label_count,
                 "selected_unique_label_count": len(selected_labels),
                 "selected_labels": selected_labels,
-                "training_cutoff": training_cutoff,
+                "training_cutoff": selection_cutoff,
             },
             "source_version": REPLAY_SOURCE_VERSION,
         }
+        if training_reference is not None:
+            config["training_reference"] = training_reference
         manifest_hash = _hash(
             {
                 "name": name,
                 "config": config,
                 "items": [
-                    {
-                        "signal_id": item["signal_id"],
-                        "label_id": item["label_id"],
-                        "feature_hash": item["feature_hash"],
-                        "input_manifest_hash": item["input_manifest_hash"],
-                    }
+                    _manifest_item(item, source_version=REPLAY_SOURCE_VERSION)
                     for item in items
                 ],
             }
@@ -152,13 +173,13 @@ class ReplayService:
             manifest_hash=manifest_hash,
             unique_label_count=len(selected_labels),
             training_cutoff_at=(
-                _time(training_cutoff["label_available_at"])
-                if training_cutoff is not None
+                _time(reported_training_cutoff["label_available_at"])
+                if reported_training_cutoff is not None
                 else None
             ),
             training_cutoff_label_id=(
-                str(training_cutoff["label_id"])
-                if training_cutoff is not None
+                str(reported_training_cutoff["label_id"])
+                if reported_training_cutoff is not None
                 else None
             ),
             rejection_reasons=tuple(rejected),
@@ -206,6 +227,7 @@ class ReplayService:
         if not items:
             reasons.append("empty_dataset")
         manifest_items: list[dict[str, str]] = []
+        source_version = str(row["source_version"])
         verified = 0
         for item in items:
             feature = json.loads(str(item["feature_payload"]))
@@ -221,15 +243,17 @@ class ReplayService:
                 continue
             verified += 1
             manifest_items.append(
-                {
-                    "signal_id": str(item["signal_id"]),
-                    "label_id": str(item["label_id"]),
-                    "feature_hash": str(item["feature_hash"]),
-                    "input_manifest_hash": str(item["input_manifest_hash"]),
-                }
+                _manifest_item(item, source_version=source_version)
             )
         config = json.loads(str(row["config_json"]))
         reasons.extend(_selection_issues(config, items))
+        reasons.extend(
+            self._training_reference_issues(
+                config,
+                items,
+                dataset_id=str(row["dataset_id"]),
+            )
+        )
         expected_manifest = _hash(
             {"name": str(row["name"]), "config": config, "items": manifest_items}
         )
@@ -264,6 +288,116 @@ class ReplayService:
                 continue
             candidates.append(item)
         return candidates, rejected
+
+    def _training_reference(
+        self,
+        dataset: str,
+        candidate_items: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        row = self.repository.get_replay_dataset(dataset)
+        if row is None:
+            raise ValueError(f"unknown training replay dataset: {dataset}")
+        dataset_id = str(row["dataset_id"])
+        verification = self.verify(dataset_id)
+        if not verification.ok:
+            raise ValueError(
+                f"training replay dataset failed verification: {dataset_id}"
+            )
+        config = json.loads(str(row["config_json"]))
+        selection = config.get("selection") if isinstance(config, dict) else None
+        if (
+            not isinstance(selection, dict)
+            or selection.get("mode") != "first_n_eligible_labels"
+        ):
+            raise ValueError(
+                "training replay dataset must use first_n_eligible_labels selection"
+            )
+        if config.get("training_reference") is not None:
+            raise ValueError("nested training replay references are not supported")
+        training_items = self.repository.replay_item_rows(dataset_id)
+        candidate_identities = {_item_identity(item) for item in candidate_items}
+        missing = [
+            str(item["signal_id"])
+            for item in training_items
+            if _item_identity(item) not in candidate_identities
+        ]
+        if missing:
+            raise ValueError(
+                "combined replay is missing exact frozen training items: "
+                + ",".join(missing[:5])
+            )
+        return {
+            "dataset_id": dataset_id,
+            "name": str(row["name"]),
+            "manifest_hash": str(row["manifest_hash"]),
+            "source_version": str(row["source_version"]),
+            "selected_unique_label_count": selection.get(
+                "selected_unique_label_count"
+            ),
+            "selected_labels": selection.get("selected_labels"),
+            "training_cutoff": selection.get("training_cutoff"),
+        }
+
+    def _training_reference_issues(
+        self,
+        config: Any,
+        items: list[Any],
+        *,
+        dataset_id: str,
+    ) -> list[str]:
+        if not isinstance(config, dict):
+            return []
+        reference = config.get("training_reference")
+        if reference is None:
+            return []
+        if not isinstance(reference, dict):
+            return ["invalid_training_reference"]
+        training_id = str(reference.get("dataset_id") or "")
+        if not training_id:
+            return ["missing_training_dataset_id"]
+        if training_id == dataset_id:
+            return ["self_referential_training_dataset"]
+        row = self.repository.get_replay_dataset(training_id)
+        if row is None:
+            return ["missing_training_dataset"]
+        training_config = json.loads(str(row["config_json"]))
+        selection = (
+            training_config.get("selection")
+            if isinstance(training_config, dict)
+            else None
+        )
+        if not isinstance(selection, dict):
+            return ["invalid_training_dataset_selection"]
+        issues: list[str] = []
+        expected_reference = {
+            "dataset_id": str(row["dataset_id"]),
+            "name": str(row["name"]),
+            "manifest_hash": str(row["manifest_hash"]),
+            "source_version": str(row["source_version"]),
+            "selected_unique_label_count": selection.get(
+                "selected_unique_label_count"
+            ),
+            "selected_labels": selection.get("selected_labels"),
+            "training_cutoff": selection.get("training_cutoff"),
+        }
+        if reference != expected_reference:
+            issues.append("training_reference_manifest_mismatch")
+        if selection.get("mode") != "first_n_eligible_labels":
+            issues.append("training_dataset_not_frozen")
+        if training_config.get("training_reference") is not None:
+            issues.append("nested_training_reference")
+        else:
+            verification = self.verify(training_id)
+            if not verification.ok:
+                issues.append("training_dataset_verification_failed")
+        current_identities = {_item_identity(item) for item in items}
+        training_items = self.repository.replay_item_rows(training_id)
+        if any(
+            _item_identity(item) not in current_identities
+            for item in training_items
+        ):
+            issues.append("combined_replay_missing_training_items")
+        return issues
 
     def _candidate_item(
         self,
@@ -385,7 +519,7 @@ def _label_entries(items: list[Any]) -> list[dict[str, str]]:
 def _selection_issues(config: Any, items: list[Any]) -> list[str]:
     if not isinstance(config, dict):
         return ["invalid_replay_config"]
-    if config.get("source_version") != REPLAY_SOURCE_VERSION:
+    if config.get("source_version") not in SELECTION_REPLAY_SOURCE_VERSIONS:
         return []
     selection = config.get("selection")
     if not isinstance(selection, dict):
@@ -416,6 +550,32 @@ def _selection_issues(config: Any, items: list[Any]) -> list[str]:
     else:
         issues.append("invalid_selection_mode")
     return issues
+
+
+def _manifest_item(item: Any, *, source_version: str) -> dict[str, str]:
+    manifest = {
+        "signal_id": str(item["signal_id"]),
+        "label_id": str(item["label_id"]),
+        "feature_hash": str(item["feature_hash"]),
+        "input_manifest_hash": str(item["input_manifest_hash"]),
+    }
+    if source_version in TIMESTAMP_BOUND_REPLAY_SOURCE_VERSIONS:
+        manifest["decision_at"] = _time(item["decision_at"]).isoformat()
+        manifest["label_available_at"] = _time(
+            item["label_available_at"]
+        ).isoformat()
+    return manifest
+
+
+def _item_identity(item: Any) -> tuple[str, str, str, str, str, str]:
+    return (
+        str(item["signal_id"]),
+        str(item["label_id"]),
+        str(item["feature_hash"]),
+        str(item["input_manifest_hash"]),
+        _time(item["decision_at"]).isoformat(),
+        _time(item["label_available_at"]).isoformat(),
+    )
 
 
 def _input_manifest_hash(rows: list[Any]) -> str:

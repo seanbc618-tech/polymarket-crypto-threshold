@@ -1,4 +1,4 @@
-"""Chronological walk-forward calibration for sealed replay datasets."""
+"""Fixed-window out-of-sample calibration for sealed replay datasets."""
 
 from __future__ import annotations
 
@@ -12,13 +12,13 @@ from uuid import uuid4
 from crypto_threshold.domain.research import CalibrationResult
 from crypto_threshold.storage.repositories import Repository
 
-CALIBRATION_SOURCE_VERSION = "walk-forward-calibration-v2"
-CALIBRATION_MODEL_VERSION = "histogram-laplace-unique-label-v2"
-CALIBRATION_METHOD = "chronological_unique_label_histogram_laplace"
+CALIBRATION_SOURCE_VERSION = "fixed-holdout-calibration-v3"
+CALIBRATION_MODEL_VERSION = "histogram-laplace-frozen-training-v3"
+CALIBRATION_METHOD = "frozen_training_unique_label_histogram_laplace"
 
 
 class CalibrationService:
-    """Evaluate calibration without training on labels unavailable at decision time."""
+    """Evaluate later labels against one immutable training replay."""
 
     def __init__(
         self,
@@ -47,13 +47,33 @@ class CalibrationService:
         samples = _latest_sample_per_label([_sample(row) for row in rows])
         started_at = _utc(self.clock())
         predictions: list[dict[str, float]] = []
-        for index, test in enumerate(samples):
+        setup_rejection: str | None = None
+        try:
+            training_samples = _frozen_training_samples(
+                self.repository,
+                json.loads(str(dataset_row["config_json"])),
+            )
+        except ValueError as exc:
+            training_samples = []
+            setup_rejection = str(exc)
+        training_label_ids = {
+            str(sample["label_id"]) for sample in training_samples
+        }
+        oos_samples = [
+            sample
+            for sample in samples
+            if str(sample["label_id"]) not in training_label_ids
+        ]
+        for test in oos_samples:
             training = [
                 sample
-                for sample in samples[:index]
-                if sample["label_available_at"] <= test["decision_at"]
+                for sample in training_samples
+                if sample["label_available_at"] < test["decision_at"]
             ]
-            if len(training) < min_train_size:
+            if (
+                len(training_samples) < min_train_size
+                or len(training) != len(training_samples)
+            ):
                 continue
             predictions.append(
                 {
@@ -67,7 +87,11 @@ class CalibrationService:
             )
 
         status = "complete" if predictions else "insufficient_data"
-        rejection = None if predictions else "no_valid_walk_forward_test_window"
+        rejection = (
+            None
+            if predictions
+            else setup_rejection or "no_valid_frozen_training_oos_window"
+        )
         metrics = _metrics(predictions, bins=bins) if predictions else {}
         completed_at = _utc(self.clock())
         run_id = f"calibration:{uuid4()}"
@@ -96,6 +120,64 @@ class CalibrationService:
             metrics=metrics,
             rejection_reason=rejection,
         )
+
+
+def _frozen_training_samples(
+    repository: Repository,
+    combined_config: Any,
+) -> list[dict[str, Any]]:
+    if not isinstance(combined_config, dict):
+        raise ValueError("invalid_combined_replay_config")
+    reference = combined_config.get("training_reference")
+    if not isinstance(reference, dict):
+        raise ValueError("missing_frozen_training_reference")
+    dataset_id = str(reference.get("dataset_id") or "")
+    if not dataset_id:
+        raise ValueError("missing_frozen_training_dataset_id")
+    training_row = repository.get_replay_dataset(dataset_id)
+    if training_row is None:
+        raise ValueError("missing_frozen_training_dataset")
+    if str(training_row["manifest_hash"]) != str(reference.get("manifest_hash") or ""):
+        raise ValueError("frozen_training_manifest_hash_mismatch")
+    training_config = json.loads(str(training_row["config_json"]))
+    selection = (
+        training_config.get("selection")
+        if isinstance(training_config, dict)
+        else None
+    )
+    if (
+        not isinstance(selection, dict)
+        or selection.get("mode") != "first_n_eligible_labels"
+    ):
+        raise ValueError("training_dataset_not_frozen")
+    selected_labels = reference.get("selected_labels")
+    if selected_labels != selection.get("selected_labels"):
+        raise ValueError("frozen_training_label_manifest_mismatch")
+    if reference.get("selected_unique_label_count") != selection.get(
+        "selected_unique_label_count"
+    ):
+        raise ValueError("frozen_training_label_count_mismatch")
+    if reference.get("training_cutoff") != selection.get("training_cutoff"):
+        raise ValueError("frozen_training_cutoff_mismatch")
+    if not isinstance(selected_labels, list):
+        raise ValueError("invalid_frozen_training_label_manifest")
+    selected_ids = {
+        str(label.get("label_id") or "")
+        for label in selected_labels
+        if isinstance(label, dict)
+    }
+    if not selected_ids or "" in selected_ids:
+        raise ValueError("invalid_frozen_training_label_ids")
+    samples = _latest_sample_per_label(
+        [
+            _sample(row)
+            for row in repository.replay_item_rows(str(training_row["dataset_id"]))
+        ]
+    )
+    sample_ids = {str(sample["label_id"]) for sample in samples}
+    if sample_ids != selected_ids:
+        raise ValueError("frozen_training_sample_manifest_mismatch")
+    return samples
 
 
 def _sample(row: Any) -> dict[str, Any]:

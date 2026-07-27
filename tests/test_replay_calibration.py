@@ -1,4 +1,4 @@
-"""Immutable replay and leakage-safe walk-forward calibration tests."""
+"""Immutable replay and leakage-safe fixed-window calibration tests."""
 
 from __future__ import annotations
 
@@ -80,6 +80,94 @@ def test_replay_seals_exact_inputs_and_detects_tampering(tmp_path: Path) -> None
     tampered = service.verify(built.dataset_id)
     assert not tampered.ok
     assert any("input_manifest_hash_mismatch" in reason for reason in tampered.reasons)
+
+
+def test_replay_manifest_detects_item_timestamp_tampering(tmp_path: Path) -> None:
+    database, repository, _label_ids = _daily_replay_candidates(
+        tmp_path, label_count=1
+    )
+    service = ReplayService(repository)
+    built = service.build("timestamp-integrity")
+    assert service.verify(built.dataset_id).ok
+
+    with database.transaction() as connection:
+        connection.execute("DROP TRIGGER protect_replay_items_update")
+        connection.execute(
+            """
+            UPDATE replay_items
+            SET decision_at = ?
+            WHERE dataset_id = ? AND ordinal = 0
+            """,
+            ((NOW + timedelta(seconds=1)).isoformat(), built.dataset_id),
+        )
+
+    tampered = service.verify(built.dataset_id)
+
+    assert not tampered.ok
+    assert "dataset_manifest_hash_mismatch" in tampered.reasons
+
+
+def test_replay_verify_keeps_legacy_v2_manifest_compatibility(
+    tmp_path: Path,
+) -> None:
+    _database, repository, _label_ids = _daily_replay_candidates(
+        tmp_path, label_count=1
+    )
+    service = ReplayService(repository)
+    current = service.build("current")
+    current_row = repository.get_replay_dataset(current.dataset_id)
+    assert current_row is not None
+    config = json.loads(str(current_row["config_json"]))
+    config["source_version"] = "replay-manifest-v2"
+    items = [dict(row) for row in repository.replay_item_rows(current.dataset_id)]
+    manifest_items = [
+        {
+            "signal_id": str(item["signal_id"]),
+            "label_id": str(item["label_id"]),
+            "feature_hash": str(item["feature_hash"]),
+            "input_manifest_hash": str(item["input_manifest_hash"]),
+        }
+        for item in items
+    ]
+    payload = {
+        "name": "legacy-v2",
+        "config": config,
+        "items": manifest_items,
+    }
+    manifest_hash = hashlib.sha256(
+        json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ).encode("utf-8")
+    ).hexdigest()
+    repository.seal_replay_dataset(
+        dataset_id="legacy-v2",
+        name="legacy-v2",
+        manifest_hash=manifest_hash,
+        config=config,
+        source_version="replay-manifest-v2",
+        created_at=TARGET + timedelta(minutes=20),
+        items=tuple(
+            {
+                "ordinal": item["ordinal"],
+                "signal_id": item["signal_id"],
+                "label_id": item["label_id"],
+                "decision_at": item["decision_at"],
+                "label_available_at": item["label_available_at"],
+                "feature_payload": item["feature_payload"],
+                "feature_hash": item["feature_hash"],
+                "input_manifest_hash": item["input_manifest_hash"],
+            }
+            for item in items
+        ),
+    )
+
+    verified = service.verify("legacy-v2")
+
+    assert verified.ok
+    assert verified.verified_count == 1
 
 
 def test_training_replay_freezes_earliest_eligible_unique_labels(
@@ -170,6 +258,59 @@ def test_replay_plan_reports_pending_training_boundary_without_writes(
     assert repository.table_count("replay_datasets") == 0
 
 
+def test_combined_replay_binds_to_verified_frozen_training_manifest(
+    tmp_path: Path,
+) -> None:
+    _database, repository, _label_ids = _daily_replay_candidates(
+        tmp_path, label_count=4
+    )
+    service = ReplayService(repository)
+    training = service.build("training", training_label_count=2)
+
+    combined = service.build("combined", training_dataset=training.dataset_id)
+
+    assert combined.unique_label_count == 4
+    assert combined.training_cutoff_at == training.training_cutoff_at
+    assert combined.training_cutoff_label_id == training.training_cutoff_label_id
+    assert service.verify(combined.dataset_id).ok
+    training_row = repository.get_replay_dataset(training.dataset_id)
+    combined_row = repository.get_replay_dataset(combined.dataset_id)
+    assert training_row is not None
+    assert combined_row is not None
+    training_config = json.loads(str(training_row["config_json"]))
+    combined_config = json.loads(str(combined_row["config_json"]))
+    reference = combined_config["training_reference"]
+    assert reference["dataset_id"] == training.dataset_id
+    assert reference["manifest_hash"] == training.manifest_hash
+    assert (
+        reference["selected_labels"]
+        == training_config["selection"]["selected_labels"]
+    )
+    assert (
+        reference["training_cutoff"]
+        == training_config["selection"]["training_cutoff"]
+    )
+
+
+def test_combined_replay_rejects_ambiguous_or_unfrozen_training_source(
+    tmp_path: Path,
+) -> None:
+    _database, repository, _label_ids = _daily_replay_candidates(
+        tmp_path, label_count=3
+    )
+    service = ReplayService(repository)
+    unfrozen = service.build("unfrozen")
+
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        service.build(
+            "ambiguous",
+            training_label_count=2,
+            training_dataset=unfrozen.dataset_id,
+        )
+    with pytest.raises(ValueError, match="first_n_eligible_labels"):
+        service.build("invalid-reference", training_dataset=unfrozen.dataset_id)
+
+
 def test_replay_verify_rejects_inconsistent_v2_selection_manifest(
     tmp_path: Path,
 ) -> None:
@@ -177,7 +318,7 @@ def test_replay_verify_rejects_inconsistent_v2_selection_manifest(
         tmp_path, label_count=1
     )
     service = ReplayService(repository)
-    built = service.build("valid-v2")
+    built = service.build("valid-current")
     dataset = repository.get_replay_dataset(built.dataset_id)
     assert dataset is not None
     config = json.loads(str(dataset["config_json"]))
@@ -209,7 +350,7 @@ def test_replay_verify_rejects_inconsistent_v2_selection_manifest(
         name="malformed-selection",
         manifest_hash="intentionally-not-the-focus",
         config=malformed_config,
-        source_version="replay-manifest-v2",
+        source_version=str(dataset["source_version"]),
         created_at=TARGET + timedelta(minutes=20),
         items=copied_items,
     )
@@ -227,6 +368,25 @@ def test_calibration_is_insufficient_when_prior_labels_were_not_yet_visible(
     result = CalibrationService(repository).run(dataset_id, bins=5, min_train_size=2)
     assert result.status == "insufficient_data"
     assert result.evaluated_count == 0
+
+
+def test_calibration_refuses_combined_replay_without_frozen_training_reference(
+    tmp_path: Path,
+) -> None:
+    _database, repository, _label_ids = _daily_replay_candidates(
+        tmp_path, label_count=2
+    )
+    dataset = ReplayService(repository).build("unbound-combined")
+
+    result = CalibrationService(repository).run(
+        dataset.dataset_id,
+        bins=5,
+        min_train_size=1,
+    )
+
+    assert result.status == "insufficient_data"
+    assert result.evaluated_count == 0
+    assert result.rejection_reason == "missing_frozen_training_reference"
 
 
 def test_empty_replay_manifest_is_not_an_acceptance_pass(tmp_path: Path) -> None:
@@ -264,11 +424,45 @@ def test_calibration_counts_repeated_snapshots_as_one_settlement_label(
     assert result.evaluated_count == 2
 
 
+def test_calibration_never_refits_frozen_training_with_prior_oos_labels(
+    tmp_path: Path,
+) -> None:
+    repository, dataset_id = _calibration_dataset(
+        tmp_path,
+        labels_visible=True,
+        uniform_probability=True,
+    )
+
+    result = CalibrationService(repository).run(dataset_id, bins=5, min_train_size=2)
+
+    assert result.status == "complete"
+    assert result.evaluated_count == 2
+    assert result.metrics["calibrated"]["brier"] == pytest.approx(0.25)
+
+
+def test_calibration_requires_every_frozen_training_label_before_oos(
+    tmp_path: Path,
+) -> None:
+    repository, dataset_id = _calibration_dataset(
+        tmp_path,
+        labels_visible=True,
+        delay_second_training_label=True,
+    )
+
+    result = CalibrationService(repository).run(dataset_id, bins=5, min_train_size=1)
+
+    assert result.status == "insufficient_data"
+    assert result.evaluated_count == 0
+    assert result.rejection_reason == "no_valid_frozen_training_oos_window"
+
+
 def _calibration_dataset(
     tmp_path: Path,
     *,
     labels_visible: bool,
     snapshots_per_label: int = 1,
+    uniform_probability: bool = False,
+    delay_second_training_label: bool = False,
 ) -> tuple[Repository, str]:
     database = Database(tmp_path / f"calibration-{labels_visible}.db")
     database.initialize()
@@ -284,6 +478,7 @@ def _calibration_dataset(
             label_available = (
                 first_decision + timedelta(hours=1)
                 if labels_visible
+                and not (delay_second_training_label and index == 1)
                 else NOW + timedelta(days=10)
             )
             connection.execute(
@@ -331,8 +526,10 @@ def _calibration_dataset(
                     (signal_id, market_id, decision.isoformat(), decision.isoformat()),
                 )
                 feature = {
-                    "estimated_probability": str(
-                        0.2 + index * 0.2 + snapshot * 0.001
+                    "estimated_probability": (
+                        "0.4"
+                        if uniform_probability
+                        else str(0.2 + index * 0.2 + snapshot * 0.001)
                     ),
                     "yes_midpoint": str(0.25 + index * 0.15),
                     "outcome_yes": index % 2 == 0,
@@ -355,11 +552,83 @@ def _calibration_dataset(
                     }
                 )
                 ordinal += 1
+    training_label_ids = {"label-0", "label-1"}
+    training_items = []
+    for item in items:
+        if item["label_id"] not in training_label_ids:
+            continue
+        training_items.append({**item, "ordinal": len(training_items)})
+    training_labels = [
+        {
+            "label_available_at": next(
+                str(item["label_available_at"])
+                for item in training_items
+                if item["label_id"] == label_id
+            ),
+            "label_id": label_id,
+        }
+        for label_id in ("label-0", "label-1")
+    ]
+    training_labels.sort(
+        key=lambda label: (label["label_available_at"], label["label_id"])
+    )
+    training_cutoff = dict(training_labels[-1])
+    training_dataset_id = f"training-{labels_visible}-{uniform_probability}"
+    training_manifest_hash = f"training-manifest-{labels_visible}-{uniform_probability}"
+    training_config = {
+        "selection": {
+            "mode": "first_n_eligible_labels",
+            "requested_unique_label_count": 2,
+            "selected_unique_label_count": 2,
+            "selected_labels": training_labels,
+            "training_cutoff": training_cutoff,
+        },
+        "source_version": "replay-manifest-v2",
+    }
+    repository.seal_replay_dataset(
+        dataset_id=training_dataset_id,
+        name=training_dataset_id,
+        manifest_hash=training_manifest_hash,
+        config=training_config,
+        source_version="test",
+        created_at=NOW,
+        items=tuple(training_items),
+    )
+    combined_labels = [
+        {
+            "label_available_at": next(
+                str(item["label_available_at"])
+                for item in items
+                if item["label_id"] == f"label-{index}"
+            ),
+            "label_id": f"label-{index}",
+        }
+        for index in range(4)
+    ]
+    combined_labels.sort(
+        key=lambda label: (label["label_available_at"], label["label_id"])
+    )
     repository.seal_replay_dataset(
         dataset_id=dataset_id,
         name=dataset_id,
         manifest_hash="test",
-        config={},
+        config={
+            "selection": {
+                "mode": "all_eligible_labels",
+                "requested_unique_label_count": None,
+                "selected_unique_label_count": 4,
+                "selected_labels": combined_labels,
+                "training_cutoff": None,
+            },
+            "training_reference": {
+                "dataset_id": training_dataset_id,
+                "manifest_hash": training_manifest_hash,
+                "selected_unique_label_count": 2,
+                "selected_labels": training_labels,
+                "training_cutoff": training_cutoff,
+            },
+            "source_version": "replay-manifest-v2",
+        },
         source_version="test",
         created_at=NOW,
         items=tuple(items),

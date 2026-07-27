@@ -18,16 +18,19 @@ def test_help_and_analyze_contract() -> None:
     analyze = runner.invoke(app, ["analyze", "--help"])
     dashboard = runner.invoke(app, ["dashboard", "--help"])
     shadow = runner.invoke(app, ["shadow", "--help"])
+    replay_build = runner.invoke(app, ["replay-build", "--help"])
     replay_plan = runner.invoke(app, ["replay-plan", "--help"])
     assert root.exit_code == 0
     assert analyze.exit_code == 0
     assert dashboard.exit_code == 0
     assert shadow.exit_code == 0
+    assert replay_build.exit_code == 0
     assert replay_plan.exit_code == 0
     assert "--market" in analyze.output
     assert "market-prob" not in analyze.output
     assert "read-only research dashboard" in dashboard.output
     assert "--duration-hours" in shadow.output
+    assert "--training-dataset" in replay_build.output
     assert "--training-label-count" in replay_plan.output
 
 

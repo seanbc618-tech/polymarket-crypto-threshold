@@ -592,6 +592,11 @@ def replay_build(
         min=1,
         help="Freeze the earliest N eligible unique labels as a training replay",
     ),
+    training_dataset: str | None = typer.Option(
+        None,
+        "--training-dataset",
+        help="Bind a combined replay to an existing frozen training replay",
+    ),
 ) -> None:
     """Seal an offline replay manifest from exact analyzed inputs and labels."""
     settings = get_settings()
@@ -604,6 +609,7 @@ def replay_build(
             name,
             contract_family=family,
             training_label_count=training_label_count,
+            training_dataset=training_dataset,
         )
     except Exception as exc:
         console.print(f"[red]Replay build failed:[/] {type(exc).__name__}: {exc}")

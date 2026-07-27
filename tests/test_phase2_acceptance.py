@@ -395,6 +395,10 @@ def test_calibration_claims_must_match_actual_replay_rows(tmp_path: Path) -> Non
     assert not training.ok
     assert not metrics.ok
     assert "sample_count_mismatch" in training.evidence["rejected_runs"][0]["reasons"]
+    assert (
+        "missing_frozen_training_reference"
+        in training.evidence["rejected_runs"][0]["reasons"]
+    )
     assert report.verdict == VERDICT_PENDING
 
 
@@ -503,9 +507,19 @@ def _full_evidence_db(path: Path) -> Database:
     assert ReplayService(repository).verify(one_item.dataset_id).ok
 
     _clone_chronological_replay_history(database, signal.signal_id)
-    built = ReplayService(
+    replay_service = ReplayService(
         repository, clock=lambda: TARGET + timedelta(days=61)
-    ).build("phase2-acceptance-fixture")
+    )
+    training = replay_service.build(
+        "phase2-training-fixture",
+        training_label_count=MIN_CHRONOLOGICAL_TRAIN_LABELS,
+    )
+    assert training.unique_label_count == MIN_CHRONOLOGICAL_TRAIN_LABELS
+    assert ReplayService(repository).verify(training.dataset_id).ok
+    built = replay_service.build(
+        "phase2-acceptance-fixture",
+        training_dataset=training.dataset_id,
+    )
     assert built.item_count == MIN_CHRONOLOGICAL_TRAIN_LABELS + 1
     assert ReplayService(repository).verify(built.dataset_id).ok
 

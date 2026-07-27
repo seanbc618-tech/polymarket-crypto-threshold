@@ -53,9 +53,10 @@ change hints. It is disabled by default and shadow/read-only when enabled. Its
 BBO never replaces REST depth: every net-EV analysis still fetches fresh YES
 and NO CLOB order books before calculating ask VWAP, fees, or slippage.
 
-Phase 2 adds immutable exact-input replay manifests, authoritative settlement labels,
-leakage-safe walk-forward calibration, a persistent paper ledger, and optional
-Polymarket/Binance stream hints. Streams select work only; every model input and
+Phase 2 adds immutable exact-input replay manifests, authoritative settlement
+labels, frozen-training out-of-sample calibration, a persistent paper ledger,
+and optional Polymarket/Binance stream hints. Later OOS labels never refit the
+frozen training window. Streams select work only; every model input and
 executable VWAP is refreshed and persisted through REST.
 
 For short Up/Down research, Polymarket's public crypto-window endpoint supplies
@@ -81,10 +82,11 @@ uv run crypto-threshold discover --asset BTC
 uv run crypto-threshold markets
 uv run crypto-threshold analyze --market <gamma_market_id>
 uv run crypto-threshold settle
-uv run crypto-threshold replay-build --name <dataset_name>
-uv run crypto-threshold replay-build --name <short_dataset> --family short_updown
-uv run crypto-threshold replay-verify --dataset <dataset_name>
-uv run crypto-threshold calibrate --dataset <dataset_name>
+uv run crypto-threshold replay-plan --db <evidence.db> --training-label-count 30
+uv run crypto-threshold replay-build --name <training> --training-label-count 30
+uv run crypto-threshold replay-build --name <combined> --training-dataset <training>
+uv run crypto-threshold replay-verify --dataset <combined>
+uv run crypto-threshold calibrate --dataset <combined>
 ```
 
 `analyze` accepts a real Gamma market ID or condition ID. It does not accept an

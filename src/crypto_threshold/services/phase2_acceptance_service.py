@@ -395,11 +395,11 @@ class Phase2AcceptanceService:
             "chronological_train_and_oos",
             ok,
             (
-                "complete calibration run has >=30 unique chronological training "
-                "labels and at least one independent OOS evaluation label"
+                "complete calibration run has >=30 unique frozen training labels "
+                "and at least one independent OOS evaluation label"
                 if ok
                 else (
-                    "no complete calibration run evidences >=30 unique chronological "
+                    "no complete calibration run evidences >=30 unique frozen "
                     "training labels plus a separate OOS evaluation window"
                 )
             ),
@@ -493,7 +493,13 @@ class Phase2AcceptanceService:
                 reasons.append("unexpected_source_version")
             if int(row["bins"] or 0) < 2:
                 reasons.append("invalid_bin_count")
-            chronology = _walk_forward_evidence(replay_rows, min_train=min_train)
+            training_rows, training_issues = self._frozen_training_rows(dataset)
+            reasons.extend(training_issues)
+            chronology = _walk_forward_evidence(
+                replay_rows,
+                min_train=min_train,
+                training_rows=training_rows,
+            )
             reasons.extend(chronology["issues"])
             computed_samples = int(chronology["sample_count"])
             if stored_samples != computed_samples:
@@ -529,6 +535,49 @@ class Phase2AcceptanceService:
                 )
             )
         return qualifying, rejected
+
+    def _frozen_training_rows(
+        self,
+        combined_dataset: Any,
+    ) -> tuple[list[Any], list[str]]:
+        if combined_dataset is None:
+            return [], ["missing_combined_replay_dataset"]
+        try:
+            config = json.loads(str(combined_dataset["config_json"]))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return [], ["invalid_combined_replay_config"]
+        reference = config.get("training_reference") if isinstance(config, dict) else None
+        if not isinstance(reference, dict):
+            return [], ["missing_frozen_training_reference"]
+        training_id = str(reference.get("dataset_id") or "")
+        if not training_id:
+            return [], ["missing_frozen_training_dataset_id"]
+        training_dataset = self.repository.get_replay_dataset(training_id)
+        if training_dataset is None:
+            return [], ["missing_frozen_training_dataset"]
+        issues: list[str] = []
+        if str(training_dataset["manifest_hash"]) != str(
+            reference.get("manifest_hash") or ""
+        ):
+            issues.append("frozen_training_manifest_hash_mismatch")
+        try:
+            training_config = json.loads(str(training_dataset["config_json"]))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return [], [*issues, "invalid_frozen_training_config"]
+        selection = (
+            training_config.get("selection")
+            if isinstance(training_config, dict)
+            else None
+        )
+        if (
+            not isinstance(selection, dict)
+            or selection.get("mode") != "first_n_eligible_labels"
+        ):
+            issues.append("training_dataset_not_frozen")
+        verification = ReplayService(self.repository).verify(training_id)
+        if not verification.ok:
+            issues.append("frozen_training_dataset_verification_failed")
+        return self.repository.replay_item_rows(training_id), issues
 
     def _check_shadow_coverage(self) -> AcceptanceCheck:
         try:
@@ -904,7 +953,73 @@ def _parse_metrics(raw: str) -> tuple[dict[str, Any], list[str]]:
     return payload, issues
 
 
-def _walk_forward_evidence(rows: list[Any], *, min_train: int) -> dict[str, Any]:
+def _walk_forward_evidence(
+    rows: list[Any],
+    *,
+    min_train: int,
+    training_rows: list[Any] | None = None,
+) -> dict[str, Any]:
+    samples, issues = _replay_samples(rows)
+    if training_rows is None:
+        training_samples: list[tuple[str, int, datetime, datetime]] | None = None
+    else:
+        training_samples, training_issues = _replay_samples(training_rows)
+        issues.extend(f"training_{issue}" for issue in training_issues)
+    evaluated = 0
+    if not issues:
+        if training_samples is None:
+            for index, (_label_id, _ordinal, decision_at, _available_at) in enumerate(
+                samples
+            ):
+                available_training = sum(
+                    1
+                    for (
+                        _prior_label,
+                        _prior_ordinal,
+                        _prior_decision,
+                        prior_available,
+                    ) in samples[:index]
+                    if prior_available < decision_at
+                )
+                if available_training >= min_train:
+                    evaluated += 1
+        else:
+            combined_label_ids = {item[0] for item in samples}
+            training_label_ids = {item[0] for item in training_samples}
+            if not training_label_ids.issubset(combined_label_ids):
+                issues.append("frozen_training_labels_missing_from_combined")
+            else:
+                for label_id, _ordinal, decision_at, _available_at in samples:
+                    if label_id in training_label_ids:
+                        continue
+                    available_training = sum(
+                        1
+                        for (
+                            _training_label,
+                            _training_ordinal,
+                            _training_decision,
+                            training_available,
+                        ) in training_samples
+                        if training_available < decision_at
+                    )
+                    if (
+                        len(training_samples) >= min_train
+                        and available_training == len(training_samples)
+                    ):
+                        evaluated += 1
+    return {
+        "sample_count": len(samples),
+        "training_label_count": (
+            len(training_samples) if training_samples is not None else None
+        ),
+        "evaluated_count": evaluated,
+        "issues": sorted(set(issues)),
+    }
+
+
+def _replay_samples(
+    rows: list[Any],
+) -> tuple[list[tuple[str, int, datetime, datetime]], list[str]]:
     parsed: list[tuple[str, int, datetime, datetime]] = []
     issues: list[str] = []
     for expected_ordinal, row in enumerate(rows):
@@ -926,11 +1041,7 @@ def _walk_forward_evidence(rows: list[Any], *, min_train: int) -> dict[str, Any]
             issues.append("label_not_strictly_after_own_decision")
         parsed.append((label_id, ordinal, decision_at, label_available_at))
     if len(parsed) != len(rows):
-        return {
-            "sample_count": 0,
-            "evaluated_count": 0,
-            "issues": sorted(set(issues)),
-        }
+        return [], sorted(set(issues))
     decisions = [item[2] for item in parsed]
     if decisions != sorted(decisions):
         issues.append("decisions_not_chronological")
@@ -944,28 +1055,7 @@ def _walk_forward_evidence(rows: list[Any], *, min_train: int) -> dict[str, Any]
         selected.values(),
         key=lambda item: (item[2], item[1], item[0]),
     )
-    evaluated = 0
-    if not issues:
-        for index, (_label_id, _ordinal, decision_at, _available_at) in enumerate(
-            samples
-        ):
-            available_training = sum(
-                1
-                for (
-                    _prior_label,
-                    _prior_ordinal,
-                    _prior_decision,
-                    prior_available,
-                ) in samples[:index]
-                if prior_available <= decision_at
-            )
-            if available_training >= min_train:
-                evaluated += 1
-    return {
-        "sample_count": len(samples),
-        "evaluated_count": evaluated,
-        "issues": sorted(set(issues)),
-    }
+    return samples, sorted(set(issues))
 
 
 def _binance_tick_issues(value: Any) -> list[str]:
