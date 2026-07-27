@@ -18,14 +18,17 @@ def test_help_and_analyze_contract() -> None:
     analyze = runner.invoke(app, ["analyze", "--help"])
     dashboard = runner.invoke(app, ["dashboard", "--help"])
     shadow = runner.invoke(app, ["shadow", "--help"])
+    replay_plan = runner.invoke(app, ["replay-plan", "--help"])
     assert root.exit_code == 0
     assert analyze.exit_code == 0
     assert dashboard.exit_code == 0
     assert shadow.exit_code == 0
+    assert replay_plan.exit_code == 0
     assert "--market" in analyze.output
     assert "market-prob" not in analyze.output
     assert "read-only research dashboard" in dashboard.output
     assert "--duration-hours" in shadow.output
+    assert "--training-label-count" in replay_plan.output
 
 
 def test_init_db_creates_read_only_schema(tmp_path: Path) -> None:
@@ -169,3 +172,55 @@ def test_empty_replay_build_is_persisted_but_fails_acceptance(
         assert connection.execute(
             "SELECT status, item_count FROM replay_datasets WHERE name='empty'"
         ).fetchone() == ("sealed", 0)
+
+
+def test_training_replay_cli_refuses_short_candidate_set_without_sealing(
+    tmp_path: Path, monkeypatch: object
+) -> None:
+    db_path = tmp_path / "short-training-replay.db"
+    monkeypatch.setenv("DATABASE_PATH", str(db_path))
+    get_settings.cache_clear()
+    result = runner.invoke(
+        app,
+        [
+            "replay-build",
+            "--name",
+            "training",
+            "--training-label-count",
+            "30",
+        ],
+    )
+    get_settings.cache_clear()
+
+    assert result.exit_code == 2
+    assert "requires 30 eligible unique" in result.output
+    assert "labels; found 0" in result.output
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM replay_datasets").fetchone()[0] == 0
+
+
+def test_replay_plan_cli_is_pending_and_does_not_write_database(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "replay-plan.db"
+    initialized = runner.invoke(app, ["init-db", "--db-path", str(db_path)])
+    assert initialized.exit_code == 0
+    modified_before = db_path.stat().st_mtime_ns
+
+    result = runner.invoke(
+        app,
+        [
+            "replay-plan",
+            "--db",
+            str(db_path),
+            "--training-label-count",
+            "30",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "Replay plan PENDING" in result.output
+    assert "eligible_unique_labels=0/30" in result.output
+    assert db_path.stat().st_mtime_ns == modified_before
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM replay_datasets").fetchone()[0] == 0

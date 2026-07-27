@@ -10,11 +10,15 @@ from decimal import Decimal
 from typing import Any
 from uuid import uuid4
 
-from crypto_threshold.domain.research import ReplayBuildResult, ReplayVerificationResult
+from crypto_threshold.domain.research import (
+    ReplayBuildResult,
+    ReplayPlanResult,
+    ReplayVerificationResult,
+)
 from crypto_threshold.domain.rules import DAILY_THRESHOLD_FAMILY, SHORT_UPDOWN_FAMILY
 from crypto_threshold.storage.repositories import Repository
 
-REPLAY_SOURCE_VERSION = "replay-manifest-v1"
+REPLAY_SOURCE_VERSION = "replay-manifest-v2"
 DAILY_REQUIRED_INPUT_ROLES = {
     "market",
     "yes_book",
@@ -54,28 +58,65 @@ class ReplayService:
         name: str,
         *,
         contract_family: str = DAILY_THRESHOLD_FAMILY,
+        training_label_count: int | None = None,
     ) -> ReplayBuildResult:
         if not name.strip():
             raise ValueError("replay dataset name is required")
+        _validate_training_label_count(training_label_count)
         required_roles = _required_roles(contract_family)
-        items: list[dict[str, Any]] = []
-        rejected: list[str] = []
-        for signal in self.repository.replay_candidate_rows(
-            contract_family=contract_family
+        candidate_items, rejected = self._eligible_candidates(
+            contract_family=contract_family,
+            required_roles=required_roles,
+        )
+        eligible_labels = _label_entries(candidate_items)
+        if (
+            training_label_count is not None
+            and len(eligible_labels) < training_label_count
         ):
-            item, reason = self._candidate_item(
-                signal,
-                ordinal=len(items),
-                required_roles=required_roles,
+            raise ValueError(
+                "training replay requires "
+                f"{training_label_count} eligible unique labels; "
+                f"found {len(eligible_labels)}"
             )
-            if item is None:
-                rejected.append(f"{signal['signal_id']}:{reason}")
+        selected_labels = (
+            eligible_labels[:training_label_count]
+            if training_label_count is not None
+            else eligible_labels
+        )
+        selected_label_ids = {
+            str(label["label_id"]) for label in selected_labels
+        }
+        items: list[dict[str, Any]] = []
+        for candidate in candidate_items:
+            if str(candidate["label_id"]) not in selected_label_ids:
                 continue
-            items.append(item)
+            items.append({**candidate, "ordinal": len(items)})
+        if training_label_count is not None:
+            rejected.extend(
+                f"{label['label_id']}:label_after_training_cutoff"
+                for label in eligible_labels[training_label_count:]
+            )
+
+        training_cutoff = (
+            dict(selected_labels[-1])
+            if training_label_count is not None and selected_labels
+            else None
+        )
 
         config = {
             "contract_family": contract_family,
             "required_input_roles": sorted(required_roles),
+            "selection": {
+                "mode": (
+                    "first_n_eligible_labels"
+                    if training_label_count is not None
+                    else "all_eligible_labels"
+                ),
+                "requested_unique_label_count": training_label_count,
+                "selected_unique_label_count": len(selected_labels),
+                "selected_labels": selected_labels,
+                "training_cutoff": training_cutoff,
+            },
             "source_version": REPLAY_SOURCE_VERSION,
         }
         manifest_hash = _hash(
@@ -109,6 +150,50 @@ class ReplayService:
             status="sealed",
             item_count=len(items),
             manifest_hash=manifest_hash,
+            unique_label_count=len(selected_labels),
+            training_cutoff_at=(
+                _time(training_cutoff["label_available_at"])
+                if training_cutoff is not None
+                else None
+            ),
+            training_cutoff_label_id=(
+                str(training_cutoff["label_id"])
+                if training_cutoff is not None
+                else None
+            ),
+            rejection_reasons=tuple(rejected),
+        )
+
+    def plan(
+        self,
+        *,
+        training_label_count: int,
+        contract_family: str = DAILY_THRESHOLD_FAMILY,
+    ) -> ReplayPlanResult:
+        """Evaluate an exact training boundary without persisting a dataset."""
+        _validate_training_label_count(training_label_count)
+        required_roles = _required_roles(contract_family)
+        candidate_items, rejected = self._eligible_candidates(
+            contract_family=contract_family,
+            required_roles=required_roles,
+        )
+        eligible_labels = _label_entries(candidate_items)
+        ready = len(eligible_labels) >= training_label_count
+        selected_count = min(len(eligible_labels), training_label_count)
+        cutoff = eligible_labels[training_label_count - 1] if ready else None
+        return ReplayPlanResult(
+            contract_family=contract_family,
+            requested_unique_label_count=training_label_count,
+            ready=ready,
+            eligible_item_count=len(candidate_items),
+            eligible_unique_label_count=len(eligible_labels),
+            selected_unique_label_count=selected_count,
+            training_cutoff_at=(
+                _time(cutoff["label_available_at"]) if cutoff is not None else None
+            ),
+            training_cutoff_label_id=(
+                str(cutoff["label_id"]) if cutoff is not None else None
+            ),
             rejection_reasons=tuple(rejected),
         )
 
@@ -144,6 +229,7 @@ class ReplayService:
                 }
             )
         config = json.loads(str(row["config_json"]))
+        reasons.extend(_selection_issues(config, items))
         expected_manifest = _hash(
             {"name": str(row["name"]), "config": config, "items": manifest_items}
         )
@@ -156,6 +242,28 @@ class ReplayService:
             ok=bool(items) and verified == len(items) and not reasons,
             reasons=tuple(reasons),
         )
+
+    def _eligible_candidates(
+        self,
+        *,
+        contract_family: str,
+        required_roles: set[str],
+    ) -> tuple[list[dict[str, Any]], list[str]]:
+        candidates: list[dict[str, Any]] = []
+        rejected: list[str] = []
+        for signal in self.repository.replay_candidate_rows(
+            contract_family=contract_family
+        ):
+            item, reason = self._candidate_item(
+                signal,
+                ordinal=0,
+                required_roles=required_roles,
+            )
+            if item is None:
+                rejected.append(f"{signal['signal_id']}:{reason}")
+                continue
+            candidates.append(item)
+        return candidates, rejected
 
     def _candidate_item(
         self,
@@ -245,6 +353,69 @@ def _required_roles(contract_family: str) -> set[str]:
     if contract_family == SHORT_UPDOWN_FAMILY:
         return SHORT_REQUIRED_INPUT_ROLES
     raise ValueError(f"unsupported replay contract family: {contract_family}")
+
+
+def _validate_training_label_count(value: int | None) -> None:
+    if value is not None and value < 1:
+        raise ValueError("training label count must be positive")
+
+
+def _label_entries(items: list[Any]) -> list[dict[str, str]]:
+    labels: dict[str, str] = {}
+    for item in items:
+        label_id = str(item["label_id"] or "")
+        if not label_id:
+            raise ValueError("eligible replay item is missing label_id")
+        available_at = _time(item["label_available_at"]).isoformat()
+        existing = labels.get(label_id)
+        if existing is not None and existing != available_at:
+            raise ValueError(
+                f"replay label has inconsistent availability timestamp: {label_id}"
+            )
+        labels[label_id] = available_at
+    return [
+        {"label_available_at": available_at, "label_id": label_id}
+        for label_id, available_at in sorted(
+            labels.items(),
+            key=lambda item: (_time(item[1]), item[0]),
+        )
+    ]
+
+
+def _selection_issues(config: Any, items: list[Any]) -> list[str]:
+    if not isinstance(config, dict):
+        return ["invalid_replay_config"]
+    if config.get("source_version") != REPLAY_SOURCE_VERSION:
+        return []
+    selection = config.get("selection")
+    if not isinstance(selection, dict):
+        return ["missing_selection_manifest"]
+    issues: list[str] = []
+    actual_labels = _label_entries(items)
+    selected_labels = selection.get("selected_labels")
+    if selected_labels != actual_labels:
+        issues.append("selected_label_manifest_mismatch")
+    if selection.get("selected_unique_label_count") != len(actual_labels):
+        issues.append("selected_unique_label_count_mismatch")
+    mode = selection.get("mode")
+    requested = selection.get("requested_unique_label_count")
+    cutoff = selection.get("training_cutoff")
+    if mode == "first_n_eligible_labels":
+        if not isinstance(requested, int) or requested < 1:
+            issues.append("invalid_requested_unique_label_count")
+        elif requested != len(actual_labels):
+            issues.append("requested_unique_label_count_mismatch")
+        expected_cutoff = actual_labels[-1] if actual_labels else None
+        if cutoff != expected_cutoff:
+            issues.append("training_cutoff_mismatch")
+    elif mode == "all_eligible_labels":
+        if requested is not None:
+            issues.append("unexpected_requested_unique_label_count")
+        if cutoff is not None:
+            issues.append("unexpected_training_cutoff")
+    else:
+        issues.append("invalid_selection_mode")
+    return issues
 
 
 def _input_manifest_hash(rows: list[Any]) -> str:

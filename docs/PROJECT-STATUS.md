@@ -516,6 +516,21 @@ project review and never authorizes live capital or Phase 3 trading work.
   with zero restarts; its first cycle completed through REST fallback with
   20 discovered, 10 analyzed workflows, zero hypothetical paper enters, no
   forbidden tables, and 10 newly persisted labels for a total of 20.
+- A strict read-only forward audit at `2026-07-27T12:27Z` found 31 immutable
+  Daily labels across 31 markets, but only 25 labels had at least one matching
+  analyzed signal with the required replay fields. Those 25 labels were split
+  9/8/8 across the July 24/25/26 target batches and linked to 2,572 candidate
+  signal snapshots. Six historical labels had no eligible analyzed decision
+  and cannot be counted or fabricated into training evidence. No replay was
+  created during this audit.
+- Replay manifest v2 adds a fail-closed training selection boundary.
+  `replay-plan --db <snapshot-or-source.db> --training-label-count 30` performs
+  the exact candidate/input validation through a read-only SQLite connection
+  and returns `PENDING` without writes until 30 eligible unique labels exist.
+  `replay-build --training-label-count 30` then selects the earliest labels by
+  `(label_received_at, label_id)`, persists the exact label list and cutoff in
+  the immutable manifest, and refuses to seal anything when fewer than 30 are
+  eligible. Offline verification also validates the v2 selection metadata.
 - The Up/Down snapshot's reported `boundary_mismatch=83` means 83 repeated
   signal rows across nine unique settled markets, not 83 markets. The rows
   comprise 65 analyzed and 18 rejected decisions across BNB, DOGE, ETH, HYPE,
@@ -592,22 +607,25 @@ project review and never authorizes live capital or Phase 3 trading work.
 - Coinbase USD versus Binance USDT is only a sanity comparison, not the
   settlement source.
 - The local sealed replay covers five unique settlement labels; the immutable
-  VPS source has 10 labels and its forward working copy currently has 20, but
-  neither VPS artifact yet has a sealed replay or valid out-of-sample
-  calibration window.
+  VPS source has 10 labels and the forward working copy has 31 raw labels but
+  only 25 replay-eligible labels at the latest exact audit. Neither VPS
+  artifact yet has a sealed replay or valid out-of-sample calibration window.
 - API schemas and fee behavior can change; parser and adapter versions make
   resulting records auditable but do not remove schema-drift risk.
 
 ## Next Gate
 
-Keep the bounded forward collector running until at least 30 unique Daily
-labels exist. At that point freeze and record the training cutoff, build and
-verify the training replay, and do not use later labels to refit that window.
-Continue collecting a separate later OOS decision batch, then rebuild the
-combined chronological replay and publish raw, calibrated, and market-baseline
-metrics. Repeating the five-hour local smoke or the completed continuous 72-hour
-run is unnecessary. Live order placement remains explicitly outside this phase
-and requires a separate design and approval.
+Keep the bounded forward collector running until the read-only
+`replay-plan --training-label-count 30` result is `READY`, not merely until the
+raw settlement-label count reaches 30. At that point create a WAL-consistent
+independent forward snapshot, freeze and record the 30-label training cutoff
+there, build and verify the training replay, and do not write a replay into the
+actively collected source database. Do not use later labels to refit that
+window. Continue collecting a separate later OOS decision batch, then rebuild
+the combined chronological replay and publish raw, calibrated, and
+market-baseline metrics. Repeating the five-hour local smoke or the completed
+continuous 72-hour run is unnecessary. Live order placement remains explicitly
+outside this phase and requires a separate design and approval.
 
 In parallel, keep the short-Up/Down evidence in its separate database. The
 authoritative-boundary correction is deployed without weakening replay

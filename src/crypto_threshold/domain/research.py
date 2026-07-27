@@ -35,6 +35,22 @@ class ReplayBuildResult:
     status: str
     item_count: int
     manifest_hash: str | None
+    unique_label_count: int = 0
+    training_cutoff_at: datetime | None = None
+    training_cutoff_label_id: str | None = None
+    rejection_reasons: tuple[str, ...] = field(default_factory=tuple)
+
+
+@dataclass(frozen=True)
+class ReplayPlanResult:
+    contract_family: str
+    requested_unique_label_count: int
+    ready: bool
+    eligible_item_count: int
+    eligible_unique_label_count: int
+    selected_unique_label_count: int
+    training_cutoff_at: datetime | None = None
+    training_cutoff_label_id: str | None = None
     rejection_reasons: tuple[str, ...] = field(default_factory=tuple)
 
 

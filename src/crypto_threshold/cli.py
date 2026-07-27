@@ -586,6 +586,12 @@ def replay_build(
         "--family",
         help="Contract family: daily_threshold or short_updown",
     ),
+    training_label_count: int | None = typer.Option(
+        None,
+        "--training-label-count",
+        min=1,
+        help="Freeze the earliest N eligible unique labels as a training replay",
+    ),
 ) -> None:
     """Seal an offline replay manifest from exact analyzed inputs and labels."""
     settings = get_settings()
@@ -597,18 +603,77 @@ def replay_build(
         result = ReplayService(Repository(database)).build(
             name,
             contract_family=family,
+            training_label_count=training_label_count,
         )
     except Exception as exc:
         console.print(f"[red]Replay build failed:[/] {type(exc).__name__}: {exc}")
         raise typer.Exit(code=2) from exc
     console.print(
-        f"Sealed {result.dataset_id}: items={result.item_count} hash={result.manifest_hash}"
+        f"Sealed {result.dataset_id}: items={result.item_count} "
+        f"unique_labels={result.unique_label_count} hash={result.manifest_hash}"
     )
+    if result.training_cutoff_at is not None:
+        console.print(
+            "  training cutoff: "
+            f"{result.training_cutoff_at.isoformat()} / "
+            f"{result.training_cutoff_label_id}"
+        )
     for reason in result.rejection_reasons:
         console.print(f"  excluded: {reason}")
     if result.item_count == 0:
         console.print("[yellow]Replay dataset is empty and cannot pass acceptance.[/]")
         raise typer.Exit(code=2)
+
+
+@app.command("replay-plan")
+def replay_plan(
+    db: Path | None = typer.Option(
+        None,
+        "--db",
+        help="Existing evidence SQLite database; defaults to DATABASE_PATH",
+    ),
+    family: str = typer.Option(
+        DAILY_THRESHOLD_FAMILY,
+        "--family",
+        help="Contract family: daily_threshold or short_updown",
+    ),
+    training_label_count: int = typer.Option(
+        30,
+        "--training-label-count",
+        min=1,
+        help="Required eligible unique labels in the frozen training replay",
+    ),
+) -> None:
+    """Plan an exact training cutoff against an existing DB without writing."""
+    database_path = db if db is not None else Path(get_settings().DATABASE_PATH)
+    database = Database(database_path, read_only=True)
+    try:
+        if family not in {DAILY_THRESHOLD_FAMILY, SHORT_UPDOWN_FAMILY}:
+            raise ValueError(f"unsupported contract family: {family}")
+        result = ReplayService(Repository(database)).plan(
+            training_label_count=training_label_count,
+            contract_family=family,
+        )
+    except Exception as exc:
+        console.print(f"[red]Replay plan failed:[/] {type(exc).__name__}: {exc}")
+        raise typer.Exit(code=2) from exc
+    verdict = "READY" if result.ready else "PENDING"
+    console.print(
+        f"Replay plan {verdict}: family={result.contract_family} "
+        f"eligible_items={result.eligible_item_count} "
+        f"eligible_unique_labels={result.eligible_unique_label_count}/"
+        f"{result.requested_unique_label_count}"
+    )
+    if result.training_cutoff_at is not None:
+        console.print(
+            "  training cutoff: "
+            f"{result.training_cutoff_at.isoformat()} / "
+            f"{result.training_cutoff_label_id}"
+        )
+    if result.rejection_reasons:
+        console.print(f"  rejected candidate signals: {len(result.rejection_reasons)}")
+    if not result.ready:
+        raise typer.Exit(code=1)
 
 
 @app.command("replay-verify")
