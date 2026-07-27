@@ -42,7 +42,7 @@ do not attempt a fix. Return the report using the guide's fixed template.
 | Up/Down service | `crypto-threshold-updown-shadow.service` |
 | Up/Down DB | `/opt/polymarket-crypto-threshold/data/updown-shadow.db` |
 | Up/Down backup timer | `crypto-threshold-updown-backup.timer` |
-| Current deployment baseline | `4af0727` |
+| Current deployment baseline | `0bae0b7` |
 
 The daily service was a bounded 73-hour evidence run. It completed naturally
 on 2026-07-27 at 14:40 CST after reporting 1,353 process-attributable cycles.
@@ -117,7 +117,7 @@ cat /opt/polymarket-crypto-threshold/.deployed-commit
 Expected:
 
 - NTP prints `yes`.
-- The deployment marker is `4af0727`, unless
+- The deployment marker is `0bae0b7`, unless
   `docs/PROJECT-STATUS.md` records a newer reviewed deployment.
 - `Observed at` in the final report must be the read-window end, not the time
   the SSH session or first command started.
@@ -425,7 +425,7 @@ for label, path in DATABASES.items():
                 ORDER BY r.candle_interval, l.status
                 """,
             ))
-            boundary_mismatch = connection.execute(
+            historical_boundary_mismatch = connection.execute(
                 """
                 SELECT
                     COUNT(*) AS signal_rows,
@@ -445,9 +445,11 @@ for label, path in DATABASES.items():
                 FROM analysis_signals AS s
                 JOIN settlement_labels AS l
                   ON l.market_id = s.market_id
-                WHERE ABS(
+                WHERE s.source_version = 'market-workflow-v1'
+                  AND l.source_version = 'chainlink-gamma-settlement-v1'
+                  AND ABS(
                     CAST(s.threshold AS REAL) - CAST(l.strike AS REAL)
-                ) > 0.000000001
+                  ) > 0.000000001
                 """
             ).fetchone()
             boundary_distribution = fetchall(
@@ -464,13 +466,60 @@ for label, path in DATABASES.items():
                   ON l.market_id = s.market_id
                 JOIN resolution_rules AS r
                   ON r.market_id = s.market_id
-                WHERE ABS(
+                WHERE s.source_version = 'market-workflow-v1'
+                  AND l.source_version = 'chainlink-gamma-settlement-v1'
+                  AND ABS(
                     CAST(s.threshold AS REAL) - CAST(l.strike AS REAL)
-                ) > 0.000000001
+                  ) > 0.000000001
                 GROUP BY s.asset, r.candle_interval, s.status
                 ORDER BY s.asset, r.candle_interval, s.status
                 """,
             )
+            post_fix_boundary_mismatch = connection.execute(
+                """
+                SELECT
+                    COUNT(*) AS signal_rows,
+                    COUNT(DISTINCT s.market_id) AS market_count
+                FROM analysis_signals AS s
+                JOIN settlement_labels AS l
+                  ON l.market_id = s.market_id
+                WHERE s.source_version = 'market-workflow-v2'
+                  AND l.source_version =
+                      'chainlink-polymarket-crypto-price-settlement-v2'
+                  AND CAST(s.threshold AS TEXT) != CAST(l.strike AS TEXT)
+                """
+            ).fetchone()
+            post_fix_boundary_pairs = connection.execute(
+                """
+                SELECT
+                    COUNT(*) AS signal_rows,
+                    COUNT(DISTINCT s.market_id) AS market_count
+                FROM analysis_signals AS s
+                JOIN settlement_labels AS l
+                  ON l.market_id = s.market_id
+                WHERE s.source_version = 'market-workflow-v2'
+                  AND l.source_version =
+                      'chainlink-polymarket-crypto-price-settlement-v2'
+                """
+            ).fetchone()
+            post_fix_signal_versions = fetchall(
+                connection,
+                """
+                SELECT source_version, model_version, status, COUNT(*)
+                FROM analysis_signals
+                WHERE source_version = 'market-workflow-v2'
+                GROUP BY source_version, model_version, status
+                ORDER BY model_version, status
+                """,
+            )
+            authoritative_payload_summary = connection.execute(
+                """
+                SELECT COUNT(*), MAX(id), MAX(received_at)
+                FROM external_payloads
+                WHERE source = 'polymarket_site'
+                  AND payload_kind = 'authoritative_window_price'
+                """
+            ).fetchone()
             outcome_mismatch = connection.execute(
                 """
                 SELECT COUNT(*)
@@ -488,18 +537,47 @@ for label, path in DATABASES.items():
                 END
                 """
             ).fetchone()[0]
-            print("boundary_mismatch", boundary_mismatch[0])
-            print("boundary_mismatch_signal_rows", boundary_mismatch[0])
-            print("boundary_mismatch_market_count", boundary_mismatch[1])
             print(
-                "boundary_mismatch_max_relative_ppm",
+                "historical_boundary_mismatch_signal_rows",
+                historical_boundary_mismatch[0],
+            )
+            print(
+                "historical_boundary_mismatch_market_count",
+                historical_boundary_mismatch[1],
+            )
+            print(
+                "historical_boundary_mismatch_max_relative_ppm",
                 (
-                    round(boundary_mismatch[2], 6)
-                    if boundary_mismatch[2] is not None
+                    round(historical_boundary_mismatch[2], 6)
+                    if historical_boundary_mismatch[2] is not None
                     else None
                 ),
             )
-            print("boundary_mismatch_distribution", boundary_distribution)
+            print(
+                "historical_boundary_mismatch_distribution",
+                boundary_distribution,
+            )
+            print(
+                "post_fix_boundary_mismatch_signal_rows",
+                post_fix_boundary_mismatch[0],
+            )
+            print(
+                "post_fix_boundary_mismatch_market_count",
+                post_fix_boundary_mismatch[1],
+            )
+            print(
+                "post_fix_boundary_pair_signal_rows",
+                post_fix_boundary_pairs[0],
+            )
+            print(
+                "post_fix_boundary_pair_market_count",
+                post_fix_boundary_pairs[1],
+            )
+            print("post_fix_signal_versions", post_fix_signal_versions)
+            print(
+                "authoritative_payload_summary",
+                authoritative_payload_summary,
+            )
             print("outcome_mismatch", outcome_mismatch)
         read_finished_at = datetime.now(UTC)
         print("read_window", read_started_at.isoformat(), read_finished_at.isoformat())
@@ -558,14 +636,16 @@ Additional interpretation:
 - `forbidden_tables` must be `[]`. Match exact table names only.
   `analysis_signals` is valid and must not be rejected because it contains the
   substring `sign`.
-- Up/Down `boundary_mismatch_signal_rows`,
-  `boundary_mismatch_market_count`, and `outcome_mismatch` must all be zero.
-  Repeated analysis of one market can produce many mismatched signal rows, so
-  always report both signal-row and unique-market counts; do not describe the
-  signal-row count as a market count. Also report the asset/interval/status
-  distribution and maximum relative ppm. Any unique mismatch remains FAIL for
-  the separate short-Up/Down replay path; do not weaken the exact comparison,
-  relabel the sample, or merge this result into the daily evidence database.
+- The pre-fix v1 audit baseline is 83 mismatched signal rows across nine unique
+  markets, with maximum relative difference `106.612262` ppm. Report it as
+  historical evidence, not a current failure, and never relabel or delete it.
+  `post_fix_boundary_mismatch_signal_rows`,
+  `post_fix_boundary_mismatch_market_count`, and `outcome_mismatch` must all be
+  zero. A zero mismatch is not acceptance while
+  `post_fix_boundary_pair_market_count` is zero; report `PENDING` until at
+  least one v2 signal and v2 label share a market. Any post-fix mismatch is
+  FAIL for the separate short-Up/Down replay path. Do not weaken exact
+  comparison or merge this evidence into the Daily database.
 - On schema v5, Up/Down must report `settlement_attempts` rather than
   `MISSING`. The due count includes only `pending` and `error` rows;
   succeeded rows are excluded because they should already have a label.
@@ -670,7 +750,7 @@ Use one overall verdict:
   evidence is still readable.
 - `FAIL`: A required service failed, active-service evidence is beyond the FAIL
   threshold, NTP is not synchronized, a DB is missing/unreadable, a forbidden
-  table exists, boundary/outcome mismatch is non-zero, or logs show an
+  table exists, post-fix boundary/outcome mismatch is non-zero, or logs show an
   unhandled exception.
 - `UNKNOWN`: SSH or permissions prevented observation. Never convert UNKNOWN
   into PASS or FAIL by guessing.
@@ -754,8 +834,9 @@ Up/Down service
 - In-progress rows and age:
 - Resolution payload summary/cursor:
 - Read window and snapshot consistency:
-- Boundary mismatch signal rows / unique markets:
-- Boundary mismatch distribution / maximum relative ppm:
+- Historical v1 boundary mismatch rows / markets / maximum ppm:
+- Post-fix v2 boundary pairs and mismatch rows / markets:
+- Post-fix signal versions / authoritative payload cursor:
 - Outcome mismatch:
 
 Backups

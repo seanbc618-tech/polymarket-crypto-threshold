@@ -37,13 +37,16 @@ research only and does not make Phase 2 accepted. The independent
 direct-connect VPS against
 `/opt/polymarket-crypto-threshold/data/updown-shadow.db`.
 
-The current source tree now fixes the Up/Down boundary contract locally.
+Commit `0bae0b7` fixes the Up/Down boundary contract and was activated on the
+VPS at `2026-07-27T19:45:40+08:00`.
 Polymarket's public crypto-window response is the signal and settlement source
 for the immutable window `openPrice`; RTDS supplies only the current tick and
 trailing volatility. Settlement independently requires the endpoint's
 completed `openPrice`/`closePrice`, Gamma's `priceToBeat`/`finalPrice`, and the
-resolved outcome to agree. This correction has not yet been deployed to the
-VPS. It does not rewrite or legitimize the 83 historical mismatched signal rows.
+resolved outcome to agree. The deployment marker is `0bae0b7` and the new
+Up/Down process is PID `136544`; Daily remained inactive after its bounded
+completion and forward retained PID `132082`. This correction does not rewrite
+or legitimize the 83 historical mismatched signal rows.
 
 On 2026-07-26, the Up/Down service was briefly restarted twice with explicit
 owner approval. Commit `b8e69d2` first added schema v5 settlement state; commit
@@ -287,6 +290,37 @@ project review and never authorizes live capital or Phase 3 trading work.
   `7.60s`; Ruff reported no findings, mypy reported no issues in 53 source
   files, and `git diff --check` was clean. No VPS process, service, database,
   deployment, or authenticated/trading mutation was performed.
+- Before activation, the existing backup unit created the WAL-consistent
+  `crypto-threshold-20260727T114109.997967Z.db` backup (`2,280,423,424`
+  bytes) with `Result=success` and `ExecMainStatus=0`. The public-only network
+  `doctor` then passed schema v5/WAL/foreign keys, Gamma discovery, CLOB time,
+  Polymarket `authoritative_window_price_read`, all seven Chainlink pairs, and
+  live NO-GO. Only the Up/Down unit was restarted. Its second v2 cycle linked
+  all 14 latest signals to authoritative window payloads; the first three
+  post-fix cycles completed through REST fallback with no forbidden tables.
+  By `2026-07-27T11:51:36Z`, the latest full cycle had all 14 markets analyzed
+  after the expected in-memory volatility warm-up and recorded four
+  hypothetical paper entries.
+- The v2 settlement path has persisted 13 labels while draining historical
+  pending markets. Every label points to a `polymarket_site` /
+  `authoritative_window_price` payload and all v2 label outcomes recompute
+  without mismatch. These are not yet same-market pairs with post-fix v2
+  signals: the first eligible analyzed 5m window ended at `11:55Z`, Gamma
+  marked it closed but had not yet published `priceToBeat`/`finalPrice`.
+  Therefore `post_fix_boundary_pair_market_count=0` is still **PENDING**, not a
+  vacuous boundary pass, and no short replay is claimed.
+- A targeted public-only settlement attempt for analyzed BTC 5m market
+  `3113700` correctly returned `SettlementPendingError` because Gamma had not
+  resolved it. The final read-only recheck at approximately `12:02Z` showed
+  all seven `11:55Z` events closed but still missing both `priceToBeat` and
+  `finalPrice`; no label was fabricated. The automatic backoff remains the
+  owner of the next attempt.
+- Final activation health showed marker `0bae0b7`, Up/Down PID `136544`,
+  `NRestarts=0`, no error-priority journal entries, and three latest
+  `complete_rest_fallback` cycles with 14 discovered and 14 analyzed. Daily
+  remained successfully inactive and forward remained active on PID `132082`.
+  No authenticated endpoint, credential, order, fill, position, or real
+  trading mutation was used.
 - Current local gate on 2026-07-25: `212 passed`; Ruff reported no findings;
   mypy reported no issues in 52 source files; `git diff --check` was clean.
 - The short-Up/Down directed suite covers all 7 assets across both intervals,
@@ -530,10 +564,11 @@ project review and never authorizes live capital or Phase 3 trading work.
 - Cross-source Gamma/window comparisons allow exact float identity or one
   adjacent IEEE-754 ULP only to accommodate JSON serialization. Replay still
   requires exact persisted decimal boundary equality.
-- The boundary correction is local and has no fresh post-fix VPS window,
-  completed settlement, or sealed short replay evidence yet. The running
-  Up/Down service remains on the pre-fix deployment until owner-approved
-  activation.
+- The boundary correction is deployed and has fresh v2 signal/payload evidence,
+  and the v2 settlement code is producing labels for historical pending
+  markets. It does not yet have a same-market post-fix v2 signal/label pair or
+  sealed short replay. Runtime activation and a zero mismatch over zero pairs
+  are not settlement or model acceptance.
 - A fresh short-Up/Down process also needs the configured trailing volatility
   history before it can analyze a boundary; warm-up rejections are persisted
   and cannot be treated as market/model failures.
@@ -575,13 +610,15 @@ run is unnecessary. Live order placement remains explicitly outside this phase
 and requires a separate design and approval.
 
 In parallel, keep the short-Up/Down evidence in its separate database. The
-authoritative-boundary correction is implemented locally without weakening
-replay equality. After code review and commit, the next action is one explicitly
-owner-approved deployment and Up/Down-only restart. Collect a fresh post-fix
-window, verify `market-workflow-v2` signals link to
-`authoritative_window_price`, wait for completed v2 labels, and build/verify a
-new `short_updown` replay. The historical 83 mismatched rows cannot satisfy
-that gate. Do not merge this evidence into the daily Phase 2 acceptance run.
+authoritative-boundary correction is deployed without weakening replay
+equality, and fresh `market-workflow-v2` signals now link to
+`authoritative_window_price`. Let the configured volatility history warm up,
+then wait for at least one same-market
+`chainlink-polymarket-crypto-price-settlement-v2` label. Require a non-zero v2
+pair count and zero exact v2 signal-to-label mismatch before building a new
+`short_updown` replay. The historical 83 mismatched rows and historical pending
+labels cannot satisfy that gate. Do not merge this evidence into the daily
+Phase 2 acceptance run.
 
 For ongoing VPS observation, check `settlement_attempts` in the Up/Down
 database. A pending row is healthy when its `next_attempt_at` is in the
