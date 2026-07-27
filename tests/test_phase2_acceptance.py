@@ -130,6 +130,50 @@ def test_full_evidence_db_is_accepted(tmp_path: Path) -> None:
     assert all(check.ok for check in report.checks)
 
 
+def test_historical_daily_schema_is_accepted_without_settlement_attempts(
+    tmp_path: Path,
+) -> None:
+    for version in (3, 4):
+        database = _full_evidence_db(tmp_path / f"schema-v{version}.db")
+        with database.transaction() as connection:
+            connection.execute("DROP TABLE settlement_attempts")
+            connection.execute(
+                "UPDATE schema_meta SET version = ? WHERE id = 1",
+                (version,),
+            )
+
+        report = Phase2AcceptanceService(Repository(database)).evaluate()
+        schema = next(
+            check for check in report.checks if check.name == "schema_integrity"
+        )
+        assert schema.ok, schema.detail
+        assert report.verdict == VERDICT_ACCEPTED
+
+
+def test_current_schema_still_requires_settlement_attempts(tmp_path: Path) -> None:
+    database = _full_evidence_db(tmp_path / "schema-v5-missing-attempts.db")
+    with database.transaction() as connection:
+        connection.execute("DROP TABLE settlement_attempts")
+
+    report = Phase2AcceptanceService(Repository(database)).evaluate()
+    schema = next(check for check in report.checks if check.name == "schema_integrity")
+    assert not schema.ok
+    assert "settlement_attempts" in schema.detail
+    assert report.verdict == VERDICT_PENDING
+
+
+def test_unknown_schema_version_fails_closed(tmp_path: Path) -> None:
+    database = _full_evidence_db(tmp_path / "schema-unknown.db")
+    with database.transaction() as connection:
+        connection.execute("UPDATE schema_meta SET version = 6 WHERE id = 1")
+
+    report = Phase2AcceptanceService(Repository(database)).evaluate()
+    schema = next(check for check in report.checks if check.name == "schema_integrity")
+    assert not schema.ok
+    assert "schema_version=6" in schema.detail
+    assert report.verdict == VERDICT_PENDING
+
+
 def test_report_markdown_and_cli_write_pending(tmp_path: Path) -> None:
     database = Database(tmp_path / "cli.db")
     database.initialize()

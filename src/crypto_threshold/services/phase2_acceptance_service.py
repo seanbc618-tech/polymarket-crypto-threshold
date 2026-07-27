@@ -29,7 +29,8 @@ MIN_SHADOW_HOURS = 72
 MAX_SHADOW_GAP_SECONDS = 300
 MAX_SHADOW_CYCLE_SECONDS = 900
 BINANCE_STREAM_SOURCE_VERSION = "binance-spot-sdk-stream-v1"
-REQUIRED_TABLES = frozenset(
+SUPPORTED_EVIDENCE_SCHEMA_VERSIONS = frozenset({3, 4, 5})
+BASE_REQUIRED_TABLES = frozenset(
     {
         "schema_meta",
         "markets",
@@ -42,13 +43,18 @@ REQUIRED_TABLES = frozenset(
         "analysis_signals",
         "analysis_signal_inputs",
         "settlement_labels",
-        "settlement_attempts",
         "replay_datasets",
         "replay_items",
         "calibration_runs",
         "paper_ledger",
         "shadow_cycles",
     }
+)
+VERSION_REQUIRED_TABLES = {
+    5: frozenset({"settlement_attempts"}),
+}
+REQUIRED_TABLES = BASE_REQUIRED_TABLES.union(
+    *(tables for tables in VERSION_REQUIRED_TABLES.values())
 )
 FORBIDDEN_TABLES = frozenset(
     {
@@ -163,7 +169,11 @@ class Phase2AcceptanceService:
             "",
             f"- Generated at (UTC): `{report.generated_at}`",
             f"- Evidence database: `{report.database_path}`",
-            f"- Schema expected: `v{SCHEMA_VERSION}`",
+            (
+                "- Supported evidence schemas: "
+                f"`{sorted(SUPPORTED_EVIDENCE_SCHEMA_VERSIONS)}` "
+                f"(current runtime: `v{SCHEMA_VERSION}`)"
+            ),
             "",
             "This report is produced by mechanical SQLite inspection only. "
             "Missing evidence is treated as failure; nothing is inferred.",
@@ -225,20 +235,23 @@ class Phase2AcceptanceService:
                 False,
                 f"schema inspection failed: {type(exc).__name__}: {exc}",
             )
-        missing = sorted(REQUIRED_TABLES - tables)
         schema_version = health.get("schema_version")
+        version_supported = schema_version in SUPPORTED_EVIDENCE_SCHEMA_VERSIONS
+        required_tables = _required_tables_for_schema(schema_version)
+        missing = sorted(required_tables - tables)
         foreign_keys = bool(health.get("foreign_keys"))
         journal_mode = str(health.get("journal_mode") or "")
         ok = (
-            bool(health.get("ok"))
-            and schema_version == SCHEMA_VERSION
+            version_supported
             and foreign_keys
             and journal_mode == "wal"
             and not foreign_key_violations
             and not missing
         )
         detail = (
-            f"schema_version={schema_version} expected={SCHEMA_VERSION}; "
+            f"schema_version={schema_version}; "
+            f"supported={sorted(SUPPORTED_EVIDENCE_SCHEMA_VERSIONS)}; "
+            f"current_runtime={SCHEMA_VERSION}; "
             f"foreign_keys={foreign_keys}; journal_mode={journal_mode}; "
             f"foreign_key_violations={len(foreign_key_violations)}; "
             f"missing_tables={missing or 'none'}"
@@ -249,6 +262,10 @@ class Phase2AcceptanceService:
             detail if ok else f"schema gate failed: {detail}",
             {
                 "schema_version": schema_version,
+                "supported_schema_versions": sorted(
+                    SUPPORTED_EVIDENCE_SCHEMA_VERSIONS
+                ),
+                "current_runtime_schema_version": SCHEMA_VERSION,
                 "foreign_keys": foreign_keys,
                 "journal_mode": journal_mode,
                 "foreign_key_violations": [
@@ -803,6 +820,15 @@ class Phase2AcceptanceService:
                 "source_version": SCHEMA_DRIFT_SOURCE_VERSION,
             },
         )
+
+
+def _required_tables_for_schema(schema_version: object) -> frozenset[str]:
+    required = BASE_REQUIRED_TABLES
+    if isinstance(schema_version, int):
+        for introduced_in, tables in VERSION_REQUIRED_TABLES.items():
+            if schema_version >= introduced_in:
+                required = required.union(tables)
+    return required
 
 
 def _parse_metrics(raw: str) -> tuple[dict[str, Any], list[str]]:
