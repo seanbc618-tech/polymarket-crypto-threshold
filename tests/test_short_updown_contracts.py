@@ -83,6 +83,22 @@ def _short_payload(
     }
 
 
+def _window_price_payload(
+    *,
+    open_price: str | None = "99999.5",
+    close_price: str | None = None,
+    completed: bool = False,
+) -> dict[str, Any]:
+    return {
+        "openPrice": open_price,
+        "closePrice": close_price,
+        "completed": completed,
+        "incomplete": not completed,
+        "cached": True,
+        "timestamp": int(NOW.timestamp() * 1000),
+    }
+
+
 @pytest.mark.parametrize("asset", sorted(SHORT_UPDOWN_ASSETS))
 @pytest.mark.parametrize("interval", ("5m", "15m"))
 def test_parser_supports_all_fourteen_live_contract_shapes(
@@ -152,10 +168,20 @@ def test_short_parser_rejects_source_pair_duration_and_status_mismatch() -> None
 
 
 class _ShortClient:
-    def __init__(self, payloads: list[dict[str, Any]]) -> None:
+    def __init__(
+        self,
+        payloads: list[dict[str, Any]],
+        *,
+        window_price_payload: dict[str, Any] | None = None,
+    ) -> None:
         self.payloads = payloads
         self.reads: list[str] = []
         self.resolution_events: dict[str, dict[str, Any]] = {}
+        self.window_price_payload = (
+            window_price_payload
+            if window_price_payload is not None
+            else _window_price_payload()
+        )
 
     def discover_updown_markets(
         self,
@@ -182,6 +208,17 @@ class _ShortClient:
     def get_event(self, event_id: str) -> dict[str, Any]:
         self.reads.append("event")
         return self.resolution_events[event_id]
+
+    def get_crypto_window_price(
+        self,
+        asset: str,
+        *,
+        interval: str,
+        start: datetime,
+        end: datetime,
+    ) -> dict[str, Any]:
+        self.reads.append(f"crypto_price:{asset}:{interval}")
+        return dict(self.window_price_payload)
 
     def get_market_event_context(
         self,
@@ -213,9 +250,8 @@ class _NoDailyProvider:
 
 
 class _ChainlinkHistory:
-    def __init__(self, payload: dict[str, Any], *, missing_boundary: bool = False) -> None:
+    def __init__(self, payload: dict[str, Any]) -> None:
         self.payload = payload
-        self.missing_boundary = missing_boundary
         market = translate_market(payload, received_at=NOW)
         assert market.event_start_time is not None
         self.start = market.event_start_time
@@ -245,9 +281,7 @@ class _ChainlinkHistory:
         *,
         tolerance_seconds: float,
     ) -> ReferencePriceTick | None:
-        if self.missing_boundary:
-            return None
-        return self.ticks[0]
+        raise AssertionError("RTDS boundary ticks are not authoritative model inputs")
 
     def latest_tick(
         self,
@@ -271,13 +305,16 @@ class _ChainlinkHistory:
 def _short_workflow(
     tmp_path: Path,
     *,
-    missing_boundary: bool = False,
+    window_price_payload: dict[str, Any] | None = None,
 ) -> tuple[MarketWorkflowService, Repository, _ShortClient]:
     database = Database(tmp_path / "short.db")
     database.initialize()
     repository = Repository(database)
     payload = _short_payload("BTC", "5m")
-    client = _ShortClient([payload])
+    client = _ShortClient(
+        [payload],
+        window_price_payload=window_price_payload,
+    )
     settings = Settings(
         DATABASE_PATH=str(database.path),
         CHAINLINK_REFERENCE_STREAM_STALE_SECONDS=10,
@@ -290,16 +327,13 @@ def _short_workflow(
         binance=_NoDailyProvider(),  # type: ignore[arg-type]
         coinbase=_NoDailyProvider(),  # type: ignore[arg-type]
         settings=settings,
-        chainlink_stream=_ChainlinkHistory(
-            payload,
-            missing_boundary=missing_boundary,
-        ),  # type: ignore[arg-type]
+        chainlink_stream=_ChainlinkHistory(payload),  # type: ignore[arg-type]
         clock=lambda: NOW + timedelta(seconds=1),
     )
     return workflow, repository, client
 
 
-def test_workflow_uses_chainlink_boundary_and_persists_exact_inputs(
+def test_workflow_uses_authoritative_window_price_and_persists_exact_inputs(
     tmp_path: Path,
 ) -> None:
     workflow, repository, _ = _short_workflow(tmp_path)
@@ -310,18 +344,27 @@ def test_workflow_uses_chainlink_boundary_and_persists_exact_inputs(
     assert signal.contract_family == SHORT_UPDOWN_FAMILY
     assert signal.affirmative_outcome == "Up"
     assert signal.negative_outcome == "Down"
-    assert signal.threshold == Decimal("100000")
+    assert signal.threshold == Decimal("99999.5")
     assert signal.model_name == "gbm_window_direction"
+    assert signal.model_version == "gbm-window-direction-v2"
+    assert signal.source_version == "market-workflow-v2"
     roles = {
         str(row["input_role"])
         for row in repository.signal_input_rows(signal.signal_id)
     }
+    authority = next(
+        row
+        for row in repository.signal_input_rows(signal.signal_id)
+        if str(row["input_role"]) == "authoritative_window_price"
+    )
+    assert authority["source"] == "polymarket_site"
+    assert authority["source_version"] == "polymarket-crypto-price-v1"
     assert {
         "market",
         "up_book",
         "down_book",
         "market_info_fee_schedule",
-        "chainlink_start_price",
+        "authoritative_window_price",
         "chainlink_current_price",
         "chainlink_volatility_window",
     }.issubset(roles)
@@ -329,17 +372,54 @@ def test_workflow_uses_chainlink_boundary_and_persists_exact_inputs(
     assert report.status == "ok"
 
 
-def test_workflow_hard_rejects_when_start_boundary_was_missed(
+def test_workflow_reconstructs_boundary_without_using_rtds_boundary_tick(
     tmp_path: Path,
 ) -> None:
-    workflow, repository, _ = _short_workflow(tmp_path, missing_boundary=True)
+    workflow, repository, _ = _short_workflow(tmp_path)
+
+    signal = workflow.analyze("market-btc-5m")
+
+    assert signal.status == "analyzed"
+    assert signal.threshold == Decimal("99999.5")
+    roles = {
+        str(row["input_role"])
+        for row in repository.signal_input_rows(signal.signal_id)
+    }
+    assert "authoritative_window_price" in roles
+    assert "chainlink_start_price" not in roles
+    assert repository.table_count("analysis_signals") == 1
+
+
+def test_workflow_caches_immutable_window_open_within_process(
+    tmp_path: Path,
+) -> None:
+    workflow, _, client = _short_workflow(tmp_path)
+
+    first = workflow.analyze("market-btc-5m")
+    second = workflow.analyze("market-btc-5m")
+
+    assert first.threshold == second.threshold == Decimal("99999.5")
+    assert client.reads.count("crypto_price:BTC:5m") == 1
+
+
+def test_workflow_hard_rejects_missing_authoritative_window_price(
+    tmp_path: Path,
+) -> None:
+    workflow, repository, _ = _short_workflow(
+        tmp_path,
+        window_price_payload=_window_price_payload(open_price=None),
+    )
 
     signal = workflow.analyze("market-btc-5m")
 
     assert signal.status == "rejected"
-    assert "missing_chainlink_window_start_tick" in signal.reasons
+    assert "missing_authoritative_window_open_price" in signal.reasons
     assert signal.estimated_probability is None
-    assert repository.table_count("analysis_signals") == 1
+    rows = repository.signal_input_rows(signal.signal_id)
+    assert any(
+        str(row["input_role"]) == "authoritative_window_price"
+        for row in rows
+    )
 
 
 def test_discovery_persists_exactly_fourteen_open_markets_without_duplicates(
@@ -372,6 +452,11 @@ def test_chainlink_settlement_tie_resolves_up_and_persists_raw_first(
     workflow, repository, client = _short_workflow(tmp_path)
     signal = workflow.analyze("market-btc-5m")
     assert signal.threshold is not None and signal.deadline is not None
+    client.window_price_payload = _window_price_payload(
+        open_price=str(signal.threshold),
+        close_price=str(signal.threshold),
+        completed=True,
+    )
     event_id = "event-btc-5m"
     client.resolution_events[event_id] = {
         "id": event_id,
@@ -405,7 +490,7 @@ def test_chainlink_settlement_tie_resolves_up_and_persists_raw_first(
     assert label.contract_family == SHORT_UPDOWN_FAMILY
     payloads = repository.external_payload_rows_after(label.payload_id - 1)
     assert len(payloads) == 1
-    assert payloads[0]["payload_kind"] == "chainlink_resolution_event"
+    assert payloads[0]["payload_kind"] == "authoritative_window_price"
     replay = ReplayService(
         repository,
         clock=lambda: signal.deadline + timedelta(minutes=2),
@@ -445,13 +530,18 @@ def test_chainlink_settlement_waits_for_final_price(tmp_path: Path) -> None:
     assert repository.get_settlement_label(signal.market_id) is None
 
 
-def test_replay_excludes_signal_when_final_boundary_disagrees(
+def test_settlement_rejects_material_gamma_boundary_disagreement(
     tmp_path: Path,
 ) -> None:
     workflow, repository, client = _short_workflow(tmp_path)
     signal = workflow.analyze("market-btc-5m")
     assert signal.threshold is not None and signal.deadline is not None
     authoritative_start = signal.threshold + Decimal("1")
+    client.window_price_payload = _window_price_payload(
+        open_price=str(signal.threshold),
+        close_price=str(signal.threshold + Decimal("1")),
+        completed=True,
+    )
     client.resolution_events["event-btc-5m"] = {
         "id": "event-btc-5m",
         "eventMetadata": {
@@ -467,22 +557,65 @@ def test_replay_excludes_signal_when_final_boundary_disagrees(
             }
         ],
     }
-    SettlementService(
+    with pytest.raises(ValueError, match="official boundary sources disagree"):
+        SettlementService(
+            repository=repository,
+            binance=_NoDailyProvider(),  # type: ignore[arg-type]
+            client=client,
+            clock=lambda: signal.deadline + timedelta(minutes=1),
+        ).settle_market(signal.market_id)
+    assert repository.get_settlement_label(signal.market_id) is None
+
+
+def test_settlement_accepts_single_ulp_json_difference_and_replay_stays_exact(
+    tmp_path: Path,
+) -> None:
+    endpoint_open = "1876.9833419425354"
+    gamma_open = "1876.9833419425356"
+    workflow, repository, client = _short_workflow(
+        tmp_path,
+        window_price_payload=_window_price_payload(open_price=endpoint_open),
+    )
+    signal = workflow.analyze("market-btc-5m")
+    assert signal.threshold == Decimal(endpoint_open)
+    assert signal.deadline is not None
+    endpoint_close = "1877"
+    client.window_price_payload = _window_price_payload(
+        open_price=endpoint_open,
+        close_price=endpoint_close,
+        completed=True,
+    )
+    client.resolution_events["event-btc-5m"] = {
+        "id": "event-btc-5m",
+        "eventMetadata": {
+            "priceToBeat": gamma_open,
+            "finalPrice": endpoint_close,
+        },
+        "markets": [
+            {
+                "id": signal.market_id,
+                "conditionId": "condition-btc-5m",
+                "closed": True,
+                "outcomes": ["Up", "Down"],
+                "outcomePrices": ["1", "0"],
+            }
+        ],
+    }
+
+    label = SettlementService(
         repository=repository,
         binance=_NoDailyProvider(),  # type: ignore[arg-type]
         client=client,
         clock=lambda: signal.deadline + timedelta(minutes=1),
     ).settle_market(signal.market_id)
 
+    assert label.strike == signal.threshold
     replay = ReplayService(repository).build(
-        "mismatched-boundary",
+        "single-ulp-boundary",
         contract_family=SHORT_UPDOWN_FAMILY,
     )
-
-    assert replay.item_count == 0
-    assert replay.rejection_reasons == (
-        f"{signal.signal_id}:settlement_threshold_mismatch",
-    )
+    assert replay.item_count == 1
+    assert ReplayService(repository).verify(replay.dataset_id).ok
 
 
 def test_short_shadow_analyzes_all_fourteen_markets_in_one_cycle(

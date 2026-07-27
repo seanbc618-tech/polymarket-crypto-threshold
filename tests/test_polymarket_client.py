@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 
 import httpx
 import pytest
@@ -156,3 +157,57 @@ def test_updown_discovery_uses_exact_tags_and_returns_all_fourteen() -> None:
     assert all(request.method == "GET" for request in requests)
     assert all(request.url.path == "/events" for request in requests)
     assert all("events" in market for market in markets)
+
+
+@pytest.mark.parametrize(
+    ("interval", "variant"),
+    (("5m", "fiveminute"), ("15m", "fifteen")),
+)
+def test_crypto_window_price_uses_public_site_endpoint_and_preserves_decimal(
+    interval: str,
+    variant: str,
+) -> None:
+    requests: list[httpx.Request] = []
+    start = datetime(2026, 7, 27, 9, 0, tzinfo=UTC)
+    end = start + timedelta(minutes=5 if interval == "5m" else 15)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            200,
+            content=(
+                b'{"openPrice":1876.9833419425354,"closePrice":null,'
+                b'"completed":false,"incomplete":true,"cached":true,'
+                b'"timestamp":1785143404845}'
+            ),
+            headers={"content-type": "application/json"},
+        )
+
+    client = GammaClobReadClient(
+        Settings(
+            POLYMARKET_SITE_API_BASE="https://polymarket.test/api",
+            _env_file=None,
+        ),
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    payload = client.get_crypto_window_price(
+        "ETH",
+        interval=interval,
+        start=start,
+        end=end,
+    )
+
+    assert payload["openPrice"] == Decimal("1876.9833419425354")
+    assert len(requests) == 1
+    request = requests[0]
+    assert request.method == "GET"
+    assert request.url == httpx.URL(
+        "https://polymarket.test/api/crypto/crypto-price",
+        params={
+            "symbol": "ETH",
+            "eventStartTime": "2026-07-27T09:00:00Z",
+            "variant": variant,
+            "endDate": end.isoformat().replace("+00:00", "Z"),
+        },
+    )

@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     POLYMARKET_FUNDER: str | None = None
     POLYMARKET_GAMMA_API_BASE: str = "https://gamma-api.polymarket.com"
     POLYMARKET_CLOB_API_BASE: str = "https://clob.polymarket.com"
+    POLYMARKET_SITE_API_BASE: str = "https://polymarket.com/api"
     BINANCE_API_BASE: str = "https://api.binance.com/api/v3"
     BINANCE_STREAM_URL: str = "wss://stream.binance.com:443"
     BINANCE_STREAM_PROXY_URL: str | None = None
@@ -65,7 +66,6 @@ class Settings(BaseSettings):
     CHAINLINK_REFERENCE_STREAM_STALE_SECONDS: float = Field(default=5.0, gt=0)
     CHAINLINK_REFERENCE_STREAM_HISTORY_SECONDS: float = Field(default=1_200.0, ge=300)
     CHAINLINK_REFERENCE_STREAM_MAX_TICKS_PER_PAIR: int = Field(default=2_000, ge=60)
-    CHAINLINK_BOUNDARY_TOLERANCE_SECONDS: float = Field(default=2.0, gt=0, le=10)
     CHAINLINK_VOLATILITY_WINDOW_SECONDS: int = Field(default=900, ge=60, le=3600)
     CHAINLINK_VOLATILITY_SAMPLE_SECONDS: int = Field(default=30, ge=1, le=60)
     CALIBRATION_BINS: int = Field(default=10, ge=2, le=100)

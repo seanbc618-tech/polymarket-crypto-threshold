@@ -171,5 +171,7 @@ sudo systemctl enable --now crypto-threshold-updown-shadow.service
 
 This service is public-data, read-only, and unbounded until explicitly stopped.
 Its evidence is exploratory and does not satisfy the daily Phase 2 acceptance
-checker. Starting mid-window must produce boundary-missing rejections until a
-new interval begins; this is expected fail-closed behavior.
+checker. Starting mid-window can reconstruct the immutable opening boundary
+through Polymarket's public crypto-window endpoint. The workflow still fails
+closed when that response, the current Chainlink tick, or the configured
+volatility history is incomplete.

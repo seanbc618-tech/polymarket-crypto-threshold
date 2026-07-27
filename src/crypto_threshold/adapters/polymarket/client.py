@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Any
 
 import httpx
 
 from crypto_threshold.adapters.polymarket.base import MarketEventContext
+from crypto_threshold.adapters.prices.polymarket_crypto import interval_variant
 from crypto_threshold.config import Settings
 from crypto_threshold.domain.assets import DAILY_THRESHOLD_ASSETS, asset_contract
 
@@ -18,6 +20,7 @@ class GammaClobReadClient:
     def __init__(self, settings: Settings, client: httpx.Client | None = None) -> None:
         self.gamma_base = settings.POLYMARKET_GAMMA_API_BASE.rstrip("/")
         self.clob_base = settings.POLYMARKET_CLOB_API_BASE.rstrip("/")
+        self.site_api_base = settings.POLYMARKET_SITE_API_BASE.rstrip("/")
         self._client = client or httpx.Client(timeout=settings.HTTP_TIMEOUT_SECONDS)
         self._owns_client = client is None
 
@@ -155,6 +158,29 @@ class GammaClobReadClient:
             raise ValueError("unexpected Gamma event response")
         return payload
 
+    def get_crypto_window_price(
+        self,
+        asset: str,
+        *,
+        interval: str,
+        start: datetime,
+        end: datetime,
+    ) -> dict[str, Any]:
+        response = self._client.get(
+            f"{self.site_api_base}/crypto/crypto-price",
+            params={
+                "symbol": asset.upper(),
+                "eventStartTime": _iso_z(start),
+                "variant": interval_variant(interval),
+                "endDate": _iso_z(end),
+            },
+        )
+        response.raise_for_status()
+        payload = response.json(parse_float=Decimal)
+        if not isinstance(payload, dict):
+            raise ValueError("unexpected Polymarket crypto-price response")
+        return payload
+
     def get_order_book(self, token_id: str) -> dict[str, Any]:
         response = self._client.get(f"{self.clob_base}/book", params={"token_id": token_id})
         response.raise_for_status()
@@ -241,3 +267,9 @@ def _search_market_payloads(payload: Any) -> list[dict[str, Any]]:
     if isinstance(markets, list):
         found.extend(item for item in markets if isinstance(item, dict))
     return found
+
+
+def _iso_z(value: datetime) -> str:
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=UTC)
+    return value.astimezone(UTC).isoformat().replace("+00:00", "Z")

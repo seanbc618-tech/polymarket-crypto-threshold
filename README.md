@@ -28,10 +28,12 @@ for preview and rejected from analysis.
 The separate short-Up/Down family supports current 5-minute and 15-minute
 markets for BTC, ETH, SOL, XRP, DOGE, BNB, and HYPE. These contracts settle on
 the matching Chainlink USD Data Stream. `Up` means the end value is greater
-than or equal to the beginning value; equality belongs to `Up`. The official
-public SDK stream must capture the exact start boundary. A process that starts
-mid-window rejects that window rather than substituting Binance or a later
-Chainlink tick.
+than or equal to the beginning value; equality belongs to `Up`. Polymarket's
+public crypto-window REST response supplies the immutable `openPrice` boundary.
+The official SDK stream supplies only the current Chainlink tick and trailing
+volatility, so a process may start mid-window without substituting a later tick
+for the opening value. Missing or malformed authoritative REST data is a hard
+rejection.
 
 ## Workflow
 
@@ -40,7 +42,7 @@ Gamma discovery
   -> raw payload + canonical market
   -> authoritative contract parser
   -> YES/NO CLOB books + per-market fee schedule
-  -> family-authoritative Binance or Chainlink reference inputs
+  -> family-authoritative Binance or Polymarket/Chainlink reference inputs
   -> Coinbase sanity check for daily thresholds only
   -> target-size ask VWAP + fee/spread/slippage net EV
   -> persisted signal or persisted rejection reasons
@@ -56,10 +58,12 @@ leakage-safe walk-forward calibration, a persistent paper ledger, and optional
 Polymarket/Binance stream hints. Streams select work only; every model input and
 executable VWAP is refreshed and persisted through REST.
 
-For short Up/Down research, the Chainlink SDK stream supplies only normalized,
-bounded in-memory reference ticks. Gamma's final public Chainlink metadata and
-resolved outcome are required for immutable labels. Daily and short replay
-datasets are family-specific and cannot be mixed.
+For short Up/Down research, Polymarket's public crypto-window endpoint supplies
+the opening boundary and completed closing value. The Chainlink SDK stream
+supplies only normalized, bounded current ticks and volatility. Settlement
+requires the endpoint values, Gamma's final public `priceToBeat`/`finalPrice`,
+and the resolved outcome to agree. Daily and short replay datasets are
+family-specific and cannot be mixed.
 
 The production ownership path is:
 

@@ -31,6 +31,15 @@ class PolymarketReadClient(Protocol):
 
     def get_event(self, event_id: str) -> dict[str, Any]: ...
 
+    def get_crypto_window_price(
+        self,
+        asset: str,
+        *,
+        interval: str,
+        start: datetime,
+        end: datetime,
+    ) -> dict[str, Any]: ...
+
     def get_market_event_context(
         self, market_id: str, condition_id: str | None, question: str
     ) -> MarketEventContext: ...

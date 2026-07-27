@@ -37,6 +37,14 @@ research only and does not make Phase 2 accepted. The independent
 direct-connect VPS against
 `/opt/polymarket-crypto-threshold/data/updown-shadow.db`.
 
+The current source tree now fixes the Up/Down boundary contract locally.
+Polymarket's public crypto-window response is the signal and settlement source
+for the immutable window `openPrice`; RTDS supplies only the current tick and
+trailing volatility. Settlement independently requires the endpoint's
+completed `openPrice`/`closePrice`, Gamma's `priceToBeat`/`finalPrice`, and the
+resolved outcome to agree. This correction has not yet been deployed to the
+VPS. It does not rewrite or legitimize the 83 historical mismatched signal rows.
+
 On 2026-07-26, the Up/Down service was briefly restarted twice with explicit
 owner approval. Commit `b8e69d2` first added schema v5 settlement state; commit
 `8866fb2` then corrected the scheduler so due retries and never-attempted
@@ -75,8 +83,8 @@ path, or position mutation exists in the runtime. Setting
   `/opt/polymarket-crypto-threshold/data/phase2-forward.db`, has a 14-day hard
   bound, and never writes the completed source database or final backup.
 - The independent short-Up/Down process has the same no-secret/no-proxy safety
-  boundary, disables Binance streaming, enables only the public Chainlink
-  reference stream, and writes only to
+  boundary, disables Binance streaming, uses Polymarket's public crypto-window
+  REST endpoint plus the public Chainlink reference stream, and writes only to
   `/opt/polymarket-crypto-threshold/data/updown-shadow.db`.
 
 ## Implemented Scope
@@ -103,14 +111,17 @@ path, or position mutation exists in the runtime. Setting
   XRP/USD, DOGE/USD, BNB/USD, and HYPE/USD. The stream has an idempotent
   lifecycle, reconnect generation, freshness checks, bounded per-pair history,
   and scrubbed health output; it never writes SQLite.
-- Short-window model inputs persist the exact start tick, current tick, and
-  trailing volatility window before the signal. Missing the start boundary is
-  a hard rejection; Binance is never substituted for a Chainlink contract.
+- Short-window model inputs persist Polymarket's public crypto-window
+  `openPrice`, the current Chainlink tick, and the trailing volatility window
+  before the signal. RTDS `boundary_tick()` is not a model input. Missing or
+  malformed public window data is a hard rejection; Binance is never
+  substituted for a Chainlink contract.
 - Short-window net EV still uses token-specific REST books, full ask-depth
   VWAP, and the per-market fee schedule. Stream BBO is only a reprice hint.
-- Chainlink settlement labels require Gamma's public `priceToBeat`,
-  `finalPrice`, and final Up/Down outcome to agree. Equality resolves to Up.
-  Incomplete resolution metadata remains pending and is retried.
+- Chainlink settlement labels require Polymarket's completed public window
+  `openPrice`/`closePrice`, Gamma's public `priceToBeat`/`finalPrice`, and the
+  final Up/Down outcome to agree. Equality resolves to Up. Incomplete
+  resolution metadata or window data remains pending and is retried.
 - Replay manifests are explicitly family-scoped. Daily Binance and short
   Chainlink labels cannot be mixed, and a signal boundary must match the
   authoritative settlement boundary before entering replay.
@@ -211,7 +222,8 @@ Two contract families are isolated:
 
 Missing fields are preview-only. Monthly hit/touch, path-dependent, range,
 `High`/`Low`, source/pair/field mismatch, stale data, malformed tokens, expired
-markets, and short windows whose exact start tick was not captured are rejected.
+markets, and short windows whose authoritative public `openPrice` is unavailable
+or malformed are rejected.
 
 ## Branch Audit
 
@@ -264,14 +276,25 @@ project review and never authorizes live capital or Phase 3 trading work.
   retry/new rotation test. The final local verification for this change was
   `217 passed`; Ruff reported no findings, mypy reported no issues in 52
   source files, and `git diff --check` was clean.
+- The local authoritative-boundary directed gate on 2026-07-27 passed 50
+  Up/Down, public-client, settlement-scheduler, and CLI tests. It verifies that
+  a missed RTDS boundary cannot become a model input, the public endpoint
+  preserves decimal JSON values, malformed authoritative data rejects before
+  probability/EV, settlement requires both public sources to agree, and a
+  single cross-source IEEE-754 ULP representation difference does not weaken
+  exact replay equality.
+- The full local boundary-fix gate on 2026-07-27 passed `229` tests in
+  `7.60s`; Ruff reported no findings, mypy reported no issues in 53 source
+  files, and `git diff --check` was clean. No VPS process, service, database,
+  deployment, or authenticated/trading mutation was performed.
 - Current local gate on 2026-07-25: `212 passed`; Ruff reported no findings;
   mypy reported no issues in 52 source files; `git diff --check` was clean.
 - The short-Up/Down directed suite covers all 7 assets across both intervals,
   official public SDK-only imports, normalization, bounded/coalesced history,
   reconnect, lifecycle, secret-safe health, Gamma tag discovery, Up/Down token
-  mapping, parser mismatches, boundary hard rejection, exact-input persistence,
-  Chainlink tie settlement, family-scoped replay, and one-cycle 14-market
-  orchestration.
+  mapping, parser mismatches, authoritative-boundary hard rejection,
+  mid-window boundary reconstruction, exact-input persistence, Chainlink tie
+  settlement, family-scoped replay, and one-cycle 14-market orchestration.
 - An isolated direct-connect VPS candidate preflight on 2026-07-25 initialized
   schema v4, passed `doctor`, returned public CLOB time, and received fresh
   Chainlink ticks for all seven pairs without a proxy or credentials.
@@ -463,12 +486,20 @@ project review and never authorizes live capital or Phase 3 trading work.
   signal rows across nine unique settled markets, not 83 markets. The rows
   comprise 65 analyzed and 18 rejected decisions across BNB, DOGE, ETH, HYPE,
   SOL, and XRP 5m/15m contracts. For each affected market, the persisted
-  boundary input was a live Chainlink tick approximately one second after the
+  pre-fix boundary input was a live Chainlink tick approximately one second after the
   exact window boundary; Gamma's authoritative `priceToBeat` differed by up to
   106.612262 ppm. Strict replay exclusion is therefore working as designed and
   must not be relaxed to make the check pass. This is a real short-Up/Down
   settlement-source alignment failure, but it does not retroactively merge
   into or invalidate the separate daily Phase 2 database.
+- A read-only public comparison then queried Polymarket's crypto-window endpoint
+  for all nine affected markets. Its `openPrice` matched the final Gamma
+  `priceToBeat` exactly for eight markets; the ETH 15m pair differed by one
+  adjacent IEEE-754 ULP in JSON representation. An active-window observation
+  also showed that `openPrice` was available before the close and remained
+  unchanged after completion. The implementation permits only this
+  cross-source one-ULP representation case; signal-to-label replay equality
+  remains exact and no ppm/time tolerance was added.
 - The same Grok snapshot saw all seven latest 5m signals rejected while all
   seven 15m signals were analyzed. A later read-only check found seven analyzed
   signals for each interval without a restart, so that pattern was transient
@@ -488,15 +519,21 @@ project review and never authorizes live capital or Phase 3 trading work.
 
 - Gamma search is relevance-based and is not a completeness guarantee.
 - Public REST snapshots are not atomic across providers.
-- The Chainlink RTDS start tick must be compared with Gamma's eventual
-  `priceToBeat` over real closed windows. Nine settled markets have now shown
-  that a live tick accepted at boundary plus approximately one second can
-  differ from the authoritative value, with an observed maximum of 106.612262
-  ppm. Any mismatch excludes that signal from replay. The capture or
-  authoritative-boundary retrieval design must be corrected before the
-  short-Up/Down replay can be accepted; tolerance widening is not a valid fix.
-- A process started or reconnected after a 5m/15m boundary cannot reconstruct
-  the beginning value from the live stream and rejects that active window.
+- Polymarket's public crypto-window endpoint is used by the website but is not
+  presently covered by the published API reference. Its URL, response schema,
+  or availability may change. The adapter is versioned, raw responses are
+  persisted, schema drift is monitored, and missing/malformed values fail
+  closed, but this remains an operational dependency.
+- The nine historical mismatch markets and their 83 signal rows remain invalid
+  for short replay. They are retained for audit and must never be relabeled or
+  admitted by widening price/time tolerance.
+- Cross-source Gamma/window comparisons allow exact float identity or one
+  adjacent IEEE-754 ULP only to accommodate JSON serialization. Replay still
+  requires exact persisted decimal boundary equality.
+- The boundary correction is local and has no fresh post-fix VPS window,
+  completed settlement, or sealed short replay evidence yet. The running
+  Up/Down service remains on the pre-fix deployment until owner-approved
+  activation.
 - A fresh short-Up/Down process also needs the configured trailing volatility
   history before it can analyze a boundary; warm-up rejections are persisted
   and cannot be treated as market/model failures.
@@ -537,11 +574,14 @@ metrics. Repeating the five-hour local smoke or the completed continuous 72-hour
 run is unnecessary. Live order placement remains explicitly outside this phase
 and requires a separate design and approval.
 
-In parallel, keep the short-Up/Down evidence in its separate database. Resolve
-the one-second live-boundary versus authoritative `priceToBeat` mismatch
-without weakening replay equality, then build and verify a `short_updown`
-replay before interpreting any paper result. Do not merge this evidence into
-the daily Phase 2 acceptance run.
+In parallel, keep the short-Up/Down evidence in its separate database. The
+authoritative-boundary correction is implemented locally without weakening
+replay equality. After code review and commit, the next action is one explicitly
+owner-approved deployment and Up/Down-only restart. Collect a fresh post-fix
+window, verify `market-workflow-v2` signals link to
+`authoritative_window_price`, wait for completed v2 labels, and build/verify a
+new `short_updown` replay. The historical 83 mismatched rows cannot satisfy
+that gate. Do not merge this evidence into the daily Phase 2 acceptance run.
 
 For ongoing VPS observation, check `settlement_attempts` in the Up/Down
 database. A pending row is healthy when its `next_attempt_at` is in the

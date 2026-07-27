@@ -242,6 +242,43 @@ def _chainlink_tick_window(payload: Any) -> list[str]:
     return issues
 
 
+def _authoritative_window_price(payload: Any) -> list[str]:
+    if not isinstance(payload, dict):
+        return ["root_not_object"]
+    request = payload.get("request")
+    normalized = payload.get("normalized")
+    response = payload.get("response")
+    if not isinstance(request, dict):
+        return ["request_not_object"]
+    if not isinstance(response, dict):
+        return ["response_not_object"]
+    if not isinstance(normalized, dict):
+        return ["normalized_not_object"]
+    issues = [
+        f"missing_request_{key}"
+        for key in ("symbol", "eventStartTime", "variant", "endDate")
+        if not _nonempty(request.get(key))
+    ]
+    for key in ("openPrice", "closePrice", "completed", "incomplete", "timestamp"):
+        if key not in response:
+            issues.append(f"missing_response_{key}")
+    for key in (
+        "provider",
+        "settlement_provider",
+        "pair",
+        "candle_interval",
+        "price_fields",
+        "timezone",
+        "observation_time",
+        "provider_timestamp",
+        "received_at",
+        "source_version",
+    ):
+        if not _nonempty(normalized.get(key)):
+            issues.append(f"missing_normalized_{key}")
+    return issues
+
+
 def _gamma_resolution_event(payload: Any) -> list[str]:
     if not isinstance(payload, dict):
         return ["root_not_object"]
@@ -287,5 +324,9 @@ _VALIDATORS: dict[tuple[str, str], Callable[[Any], list[str]]] = {
     ("chainlink", "chainlink_start_price"): _chainlink_tick,
     ("chainlink", "chainlink_current_price"): _chainlink_tick,
     ("chainlink", "chainlink_volatility_window"): _chainlink_tick_window,
+    (
+        "polymarket_site",
+        "authoritative_window_price",
+    ): _authoritative_window_price,
     ("gamma", "chainlink_resolution_event"): _gamma_resolution_event,
 }

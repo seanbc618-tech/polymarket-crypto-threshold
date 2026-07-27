@@ -63,6 +63,7 @@ def test_doctor_checks_db_urls_providers_and_trading_mode(
         "phase2_mode",
         "gamma_url",
         "clob_url",
+        "site_api_url",
         "binance_stream_url",
         "trading_mode",
     ):

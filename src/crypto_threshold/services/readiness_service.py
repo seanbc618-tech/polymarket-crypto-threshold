@@ -59,9 +59,10 @@ class ResearchReadinessService:
                 bool(
                     self.settings.POLYMARKET_GAMMA_API_BASE
                     and self.settings.POLYMARKET_CLOB_API_BASE
+                    and self.settings.POLYMARKET_SITE_API_BASE
                 ),
                 "configured",
-                "Gamma/CLOB public read endpoints are configured",
+                "Gamma/CLOB/site public read endpoints are configured",
             ),
             self._wallet_check(),
             ReadinessCheck(

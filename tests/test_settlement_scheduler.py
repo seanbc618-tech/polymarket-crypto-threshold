@@ -27,12 +27,31 @@ class _ResolutionClient:
         self.events = events
         self.failures = failures or set()
         self.calls: list[str] = []
+        self.price_calls: list[tuple[str, str]] = []
 
     def get_event(self, event_id: str) -> dict[str, Any]:
         self.calls.append(event_id)
         if event_id in self.failures:
             raise TimeoutError("test timeout")
         return self.events[event_id]
+
+    def get_crypto_window_price(
+        self,
+        asset: str,
+        *,
+        interval: str,
+        start: datetime,
+        end: datetime,
+    ) -> dict[str, Any]:
+        self.price_calls.append((asset, interval))
+        return {
+            "openPrice": "100",
+            "closePrice": "101",
+            "completed": True,
+            "incomplete": False,
+            "cached": True,
+            "timestamp": int(end.timestamp() * 1000),
+        }
 
 
 def _seed_markets(
@@ -69,12 +88,13 @@ def _seed_markets(
                     rule_id, market_id, event_id, condition_id,
                     yes_token_id, no_token_id, asset, settlement_source, pair,
                     exact_operator, strike, candle_interval, price_field,
-                    timezone, observation_time, target_time_utc, tradable,
+                    timezone, observation_time, target_time_utc,
+                    window_start_time_utc, tradable,
                     preview_only, raw_description, contract_family,
                     boundary_type, affirmative_outcome, negative_outcome
                 ) VALUES (?, ?, ?, ?, ?, ?, 'BTC', 'chainlink', 'BTC/USD',
                           '>=', '100', '5m', 'data_stream_value', 'UTC',
-                          'window_start', ?, 1, 0, 'test', ?,
+                          'window_start', ?, ?, 1, 0, 'test', ?,
                           'window_start_price', 'Up', 'Down')
                 """,
                 (
@@ -85,6 +105,7 @@ def _seed_markets(
                     f"{market_id}-up",
                     f"{market_id}-down",
                     target.isoformat(),
+                    (target - timedelta(minutes=5)).isoformat(),
                     SHORT_UPDOWN_FAMILY,
                 ),
             )
@@ -244,7 +265,7 @@ def test_pending_backoff_and_unchanged_payload_deduplication(
     labels = service.settle_due(limit=1)
 
     assert len(labels) == 1
-    assert repository.table_count("external_payloads") == 2
+    assert repository.table_count("external_payloads") == 3
 
 
 def test_one_settlement_error_does_not_block_other_candidates(

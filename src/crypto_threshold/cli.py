@@ -15,11 +15,15 @@ from rich.table import Table
 from crypto_threshold.adapters.keychain import KeychainStore
 from crypto_threshold.adapters.polymarket.client import GammaClobReadClient
 from crypto_threshold.adapters.polymarket.stream import PolymarketStreamBridge
+from crypto_threshold.adapters.polymarket.translator import translate_market
 from crypto_threshold.adapters.prices.binance import BinanceProvider
 from crypto_threshold.adapters.prices.chainlink_stream import (
     ChainlinkReferencePriceStream,
 )
 from crypto_threshold.adapters.prices.coinbase import CoinbaseProvider
+from crypto_threshold.adapters.prices.polymarket_crypto import (
+    parse_crypto_window_price,
+)
 from crypto_threshold.adapters.prices.stream import BinanceReferencePriceStream
 from crypto_threshold.config import get_settings, load_settings
 from crypto_threshold.domain.assets import (
@@ -29,6 +33,7 @@ from crypto_threshold.domain.assets import (
 from crypto_threshold.domain.rules import (
     DAILY_THRESHOLD_FAMILY,
     SHORT_UPDOWN_FAMILY,
+    parse_contract,
 )
 from crypto_threshold.services.calibration_service import CalibrationService
 from crypto_threshold.services.discovery_service import DiscoveryService
@@ -193,6 +198,7 @@ def doctor(
     for name, value in (
         ("gamma_url", settings.POLYMARKET_GAMMA_API_BASE),
         ("clob_url", settings.POLYMARKET_CLOB_API_BASE),
+        ("site_api_url", settings.POLYMARKET_SITE_API_BASE),
         ("binance_url", settings.BINANCE_API_BASE),
         ("coinbase_url", settings.COINBASE_API_BASE),
     ):
@@ -232,6 +238,66 @@ def doctor(
                         f"response_markets={len(discovered)}",
                     )
                 )
+                markets = [
+                    translate_market(payload, received_at=now)
+                    for payload in discovered
+                ]
+                active_market = next(
+                    (
+                        market
+                        for market in markets
+                        if market.event_start_time is not None
+                        and market.gamma_end_date is not None
+                        and market.event_start_time <= now < market.gamma_end_date
+                    ),
+                    None,
+                )
+                active_rule = (
+                    parse_contract(active_market, now=now)
+                    if active_market is not None
+                    else None
+                )
+                if (
+                    active_rule is None
+                    or not active_rule.tradable
+                    or not active_rule.pair
+                    or not active_rule.candle_interval
+                    or active_rule.window_start_time_utc is None
+                    or active_rule.target_time_utc is None
+                ):
+                    checks.append(
+                        (
+                            "authoritative_window_price_read",
+                            False,
+                            "no active short Up/Down contract",
+                        )
+                    )
+                else:
+                    price_payload = polymarket.get_crypto_window_price(
+                        active_rule.asset,
+                        interval=active_rule.candle_interval,
+                        start=active_rule.window_start_time_utc,
+                        end=active_rule.target_time_utc,
+                    )
+                    price = parse_crypto_window_price(
+                        price_payload,
+                        asset=active_rule.asset,
+                        pair=active_rule.pair,
+                        interval=active_rule.candle_interval,
+                        start=active_rule.window_start_time_utc,
+                        end=active_rule.target_time_utc,
+                        received_at=datetime.now(UTC),
+                    )
+                    checks.append(
+                        (
+                            "authoritative_window_price_read",
+                            price.open_price > 0,
+                            (
+                                f"asset={price.asset} interval={price.interval} "
+                                f"open_price={price.open_price}"
+                            ),
+                        )
+                    )
             else:
                 for asset in sorted(DAILY_THRESHOLD_ASSETS):
                     discovered = polymarket.discover_markets(asset, 1)

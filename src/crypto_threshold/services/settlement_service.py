@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
@@ -12,6 +13,13 @@ from uuid import uuid4
 
 from crypto_threshold.adapters.polymarket.base import PolymarketReadClient
 from crypto_threshold.adapters.prices.binance import BinanceProvider
+from crypto_threshold.adapters.prices.polymarket_crypto import (
+    AUTHORITATIVE_WINDOW_PRICE_KIND,
+    POLYMARKET_CRYPTO_PRICE_SOURCE,
+    POLYMARKET_CRYPTO_PRICE_SOURCE_VERSION,
+    crypto_window_price_evidence,
+    parse_crypto_window_price,
+)
 from crypto_threshold.domain.assets import SUPPORTED_ASSETS, asset_contract
 from crypto_threshold.domain.research import SettlementLabel
 from crypto_threshold.domain.rules import (
@@ -22,7 +30,7 @@ from crypto_threshold.domain.rules import (
 from crypto_threshold.storage.repositories import Repository
 
 SETTLEMENT_SOURCE_VERSION = "binance-settlement-v1"
-CHAINLINK_SETTLEMENT_SOURCE_VERSION = "chainlink-gamma-settlement-v1"
+CHAINLINK_SETTLEMENT_SOURCE_VERSION = "chainlink-polymarket-crypto-price-settlement-v2"
 GAMMA_EVENT_SOURCE_VERSION = "gamma-event-v1"
 PENDING_BACKOFF = (
     timedelta(minutes=5),
@@ -194,6 +202,7 @@ class SettlementService:
     def _settle_short_updown(self, row: Row, *, now: datetime) -> SettlementLabel:
         market_id = str(row["market_id"])
         target = _required_time(row, "target_time_utc")
+        window_start = _required_time(row, "window_start_time_utc")
         if now < target:
             raise ValueError("settlement boundary has not passed")
         _require_short_contract(row)
@@ -210,7 +219,7 @@ class SettlementService:
             market_id=market_id,
             condition_id=str(row["condition_id"] or ""),
         )
-        payload_id, _ = self.repository.record_settlement_payload_if_changed(
+        _gamma_payload_id, _ = self.repository.record_settlement_payload_if_changed(
             market_id=market_id,
             source="gamma",
             payload_kind="chainlink_resolution_event",
@@ -230,12 +239,68 @@ class SettlementService:
             or resolved_market.get("eventMetadata")
             or event.get("metadata")
         )
-        start_price = _positive_decimal(metadata.get("priceToBeat"))
-        final_price = _positive_decimal(metadata.get("finalPrice"))
-        if start_price is None or final_price is None:
+        gamma_start_price = _positive_decimal(metadata.get("priceToBeat"))
+        gamma_final_price = _positive_decimal(metadata.get("finalPrice"))
+        if gamma_start_price is None or gamma_final_price is None:
             raise SettlementPendingError(
                 "Chainlink priceToBeat/finalPrice is not published"
             )
+
+        try:
+            window_payload = self.client.get_crypto_window_price(
+                str(row["asset"]),
+                interval=str(row["candle_interval"]),
+                start=window_start,
+                end=target,
+            )
+        except Exception as exc:
+            raise SettlementPendingError(
+                "Polymarket authoritative window price is unavailable"
+            ) from exc
+        window_received_at = _utc(self.clock())
+        window_evidence = crypto_window_price_evidence(
+            window_payload,
+            asset=str(row["asset"]),
+            pair=str(row["pair"]),
+            interval=str(row["candle_interval"]),
+            start=window_start,
+            end=target,
+            received_at=window_received_at,
+        )
+        window_payload_id = self.repository.record_external_payload(
+            market_id=market_id,
+            source=POLYMARKET_CRYPTO_PRICE_SOURCE,
+            payload_kind=AUTHORITATIVE_WINDOW_PRICE_KIND,
+            payload=window_evidence,
+            observed_at=target,
+            received_at=window_received_at,
+            source_version=POLYMARKET_CRYPTO_PRICE_SOURCE_VERSION,
+        )
+        try:
+            window_price = parse_crypto_window_price(
+                window_payload,
+                asset=str(row["asset"]),
+                pair=str(row["pair"]),
+                interval=str(row["candle_interval"]),
+                start=window_start,
+                end=target,
+                received_at=window_received_at,
+            )
+        except ValueError as exc:
+            if str(exc).startswith("missing_authoritative_window_"):
+                raise SettlementPendingError(str(exc)) from exc
+            raise
+        if not window_price.completed or window_price.close_price is None:
+            raise SettlementPendingError(
+                "Polymarket authoritative window close is not published"
+            )
+        if not _same_official_price(window_price.open_price, gamma_start_price):
+            raise ValueError("official boundary sources disagree")
+        if not _same_official_price(window_price.close_price, gamma_final_price):
+            raise ValueError("official final-price sources disagree")
+
+        start_price = window_price.open_price
+        final_price = window_price.close_price
         resolved_up = _resolved_affirmative_outcome(resolved_market)
         computed_up = threshold_satisfied(final_price, start_price, ">=")
         if resolved_up is None:
@@ -255,9 +320,9 @@ class SettlementService:
             strike=start_price,
             observed_value=final_price,
             outcome_yes=computed_up,
-            payload_id=payload_id,
+            payload_id=window_payload_id,
             observed_at=target,
-            received_at=received_at,
+            received_at=window_received_at,
             source_version=CHAINLINK_SETTLEMENT_SOURCE_VERSION,
             contract_family=SHORT_UPDOWN_FAMILY,
         )
@@ -267,6 +332,19 @@ class SettlementService:
 def _pending_delay(attempt_count: int) -> timedelta:
     index = max(0, min(attempt_count - 1, len(PENDING_BACKOFF) - 1))
     return PENDING_BACKOFF[index]
+
+
+def _same_official_price(left: Decimal, right: Decimal) -> bool:
+    left_float = float(left)
+    right_float = float(right)
+    if not math.isfinite(left_float) or not math.isfinite(right_float):
+        return False
+    if left_float == right_float:
+        return True
+    return abs(left_float - right_float) <= max(
+        math.ulp(left_float),
+        math.ulp(right_float),
+    )
 
 
 def _short_reason(error: Exception) -> str:

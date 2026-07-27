@@ -29,7 +29,7 @@ SHORT_REQUIRED_INPUT_ROLES = {
     "up_book",
     "down_book",
     "market_info_fee_schedule",
-    "chainlink_start_price",
+    "authoritative_window_price",
     "chainlink_current_price",
     "chainlink_volatility_window",
 }
