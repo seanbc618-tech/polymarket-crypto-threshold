@@ -18,10 +18,11 @@ completed cleanly and produced a verified replay, but its 132 decision snapshots
 represent only five unique settlement labels and no later out-of-sample window.
 The current local development network requires an explicit outbound proxy for
 Binance WebSocket access; the proxied stream produced valid BTCUSDT and ETHUSDT
-1m Close ticks. A separate direct-connect Hong Kong VPS deployment is now
-running the formal Phase 2 shadow window against a fresh evidence database.
-Reconnect evidence and unique-label out-of-sample calibration remain pending.
-These are evidence gaps, not successes.
+1m Close ticks. The separate direct-connect Hong Kong VPS deployment completed
+its formal bounded Phase 2 shadow window against a fresh evidence database on
+2026-07-27. Continuous coverage and reconnect evidence passed. The database
+still contains only 10 unique settlement labels and no sealed VPS replay or
+out-of-sample calibration. These are evidence gaps, not successes.
 
 A separate read-only research expansion now supports the currently observed
 5-minute and 15-minute Polymarket Up/Down contract family for BTC, ETH, SOL,
@@ -233,11 +234,10 @@ results:
   claiming improvement when the measurements do not support it.
 - The bounded 5-hour local proxy-backed smoke is complete with cycle, fallback,
   rejection, paper-ledger, and external schema-drift evidence.
-- Complete the active direct-connect VPS shadow window for at least 72 persisted
-  hours. This remains the mechanical acceptance threshold.
-- A valid closed Binance 1m stream tick has been demonstrated on the deployment
-  network; reconnect evidence remains pending. REST must remain operational
-  when the stream cannot do so.
+- The direct-connect VPS shadow window completed with 72.956
+  process-attributable hours and passed the mechanical continuity threshold.
+- Valid closed Binance 1m stream ticks and reconnect generation were persisted
+  on the deployment network. REST remained independently operational.
 - Reconfirm that no order, fill, position, signer, or authenticated trading
   mutation exists, and that any configured private key remains Keychain-only
   and disconnected.
@@ -409,6 +409,26 @@ project review and never authorizes live capital or Phase 3 trading work.
   while the current checker expects v5 and `settlement_attempts`, and it has no
   sealed VPS replay, complete chronological OOS calibration, or complete
   metrics. The coverage gate also had not yet reached 72 hours at that read.
+- The bounded daily process completed naturally at `2026-07-27T06:39:58Z`
+  after reporting 1,353 process-attributable cycles. Systemd moved it to
+  `inactive/dead` at `06:40:00Z` with `Result=success`, exit status 0, and zero
+  restarts. It must remain stopped. A final read-only query found 1,353 cycles
+  from the current process start, spanning 72.956423 hours with a maximum
+  start-to-start gap of 215.808 seconds and maximum cycle duration of 35.797
+  seconds. The database includes two earlier provenance-separated cycles, so
+  its total is 1,355 and its mechanical span is 73.06 hours.
+- Final source inspection reported `PRAGMA integrity_check=ok`, zero foreign-key
+  violations, no forbidden trading tables, and SHA-256
+  `daacca7d531808c4e4ff828c479b817d9eed55530cdfb7f22cf62b3d0f3f2287`.
+  The final mechanical result remains `PENDING/NOT ACCEPTED`. Shadow coverage,
+  REST/rejection/paper evidence, schema-drift monitoring over 134,030 payloads,
+  no-trading surface, and Binance stream/reconnect evidence passed. Schema
+  compatibility, sealed replay, chronological OOS calibration, and metrics
+  failed.
+- The final database is approximately 2.85 GB. The latest scheduled daily
+  backup predates process completion, so a final WAL-consistent backup, hash,
+  and integrity check are still required before deleting any old local smoke
+  history.
 - The Up/Down snapshot's reported `boundary_mismatch=83` means 83 repeated
   signal rows across nine unique settled markets, not 83 markets. The rows
   comprise 65 analyzed and 18 rejected decisions across BNB, DOGE, ETH, HYPE,
@@ -464,25 +484,27 @@ project review and never authorizes live capital or Phase 3 trading work.
   REST remains mandatory for VWAP and final validation.
 - The official `polymarket-client` release is a beta API and can change.
 - Public Binance WebSocket connectivity on the local development network
-  requires the explicit local proxy. Direct VPS connectivity is verified, but
-  a natural or controlled reconnect has not yet been persisted. The stream
-  remains opt-in and REST remains authoritative.
+  requires the explicit local proxy. Direct VPS connectivity and reconnect
+  evidence are verified. The stream remains opt-in and REST remains
+  authoritative.
 - Coinbase USD versus Binance USDT is only a sanity comparison, not the
   settlement source.
-- The terminal GBM model has only five unique settled contract labels and no
-  valid out-of-sample calibration window.
+- The local sealed replay covers five unique settlement labels; the completed
+  VPS database has 10 labels but no sealed replay or valid out-of-sample
+  calibration window.
 - API schemas and fee behavior can change; parser and adapter versions make
   resulting records auditable but do not remove schema-drift risk.
 
 ## Next Gate
 
-Let the bounded daily process finish naturally at approximately
-`2026-07-27T06:39:56Z`, then perform the final read-only service, cycle-gap, and
-acceptance review. Preserve the original schema-v3 database and its hash; do
-not migrate or rewrite the only evidence artifact in place. Review the
-schema-v3/v5 checker mismatch on an immutable backup or copy before deciding
-whether acceptance needs a compatibility path or a migrated derived artifact.
-The elapsed-time gate alone will not accept Phase 2.
+Create a final WAL-consistent backup of the completed daily database, record its
+hash and integrity result, and preserve the original schema-v3 source
+unchanged. Then fix the acceptance checker's historical-schema compatibility:
+schema v5 and `settlement_attempts` were added later for settlement scheduling
+and must not retroactively invalidate otherwise complete schema-v3 daily
+evidence. Prove the compatibility behavior with tests and rerun acceptance on
+the immutable backup or copy. Do not migrate or rewrite the only source
+evidence artifact in place.
 
 Continue collecting forward decisions for new daily contracts, settle them
 after their authoritative Binance candle closes, and rebuild replay until at

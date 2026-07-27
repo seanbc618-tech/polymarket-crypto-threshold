@@ -41,11 +41,11 @@ do not attempt a fix. Return the report using the guide's fixed template.
 | Up/Down backup timer | `crypto-threshold-updown-backup.timer` |
 | Current deployment baseline | `8866fb2` |
 
-The daily service is a bounded 73-hour evidence run. It began on
-2026-07-24 and is expected to exit normally around 2026-07-27 14:40 CST.
-After that time, `inactive/dead` with `Result=success` can be expected
-completion. Never restart it. Report completion to the owner/Codex for final
-backup and acceptance review.
+The daily service was a bounded 73-hour evidence run. It completed naturally
+on 2026-07-27 at 14:40 CST after reporting 1,353 process-attributable cycles.
+Its expected state is now `inactive/dead` with `Result=success`,
+`ExecMainStatus=0`, and zero restarts. Never restart it. Report any later
+active state as unexpected and hand it to the owner/Codex.
 
 The Up/Down service is intentionally continuous. Unless the owner explicitly
 stopped it, it should remain `active/running`.
