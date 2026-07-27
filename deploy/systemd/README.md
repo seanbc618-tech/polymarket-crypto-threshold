@@ -100,6 +100,46 @@ sudo -u crypto-threshold \
 An acceptance exit code of `0` is evidence for final review only. It never
 authorizes capital, signing, authenticated reconciliation, or order placement.
 
+## Forward Daily-Label Collection
+
+After the bounded database is stopped, backed up, hashed, and reviewed, preserve
+it unchanged. Create the continuation database only from that verified backup:
+
+```bash
+sudo -u crypto-threshold cp \
+  /opt/polymarket-crypto-threshold/backups/final/<verified-backup>.db \
+  /opt/polymarket-crypto-threshold/data/phase2-forward.db
+
+sudo -u crypto-threshold env \
+  DATABASE_PATH=/opt/polymarket-crypto-threshold/data/phase2-forward.db \
+  TRADING_DISABLED=true \
+  /opt/polymarket-crypto-threshold/.venv/bin/crypto-threshold init-db
+```
+
+`init-db` migrates only the working copy to the current schema. Never run it
+against the completed source database or the final backup.
+
+Install the dedicated lower-cadence collector and its backup timer:
+
+```bash
+sudo install -o root -g crypto-threshold -m 0640 \
+  deploy/env/hk-forward-shadow.example.env \
+  /etc/polymarket-crypto-forward.env
+sudo install -o root -g root -m 0644 \
+  deploy/systemd/crypto-threshold-forward-shadow.service \
+  deploy/systemd/crypto-threshold-forward-backup.service \
+  deploy/systemd/crypto-threshold-forward-backup.timer \
+  /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now crypto-threshold-forward-backup.timer
+sudo systemctl enable --now crypto-threshold-forward-shadow.service
+```
+
+This service is bounded to 14 days and uses a 15-minute cadence. Its purpose is
+to collect new forward daily-threshold labels after the already-completed
+continuous shadow gate, not to rerun or overwrite that gate. Stop it early once
+the training and later OOS label windows have enough evidence.
+
 ## Independent 5m/15m Up/Down Shadow
 
 The short-duration research service is deliberately separate from the formal

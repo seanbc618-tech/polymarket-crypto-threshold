@@ -309,6 +309,29 @@ def test_sparse_shadow_endpoints_are_not_continuous_evidence(tmp_path: Path) -> 
     assert report.verdict == VERDICT_PENDING
 
 
+def test_completed_shadow_segment_survives_a_later_collection_gap(
+    tmp_path: Path,
+) -> None:
+    database = _full_evidence_db(tmp_path / "continued-shadow.db")
+    with database.transaction() as connection:
+        _insert_shadow_cycle(
+            connection,
+            cycle_id="shadow:later-session",
+            started=NOW + timedelta(hours=80),
+            completed=NOW + timedelta(hours=80, seconds=1),
+            status="complete_rest_fallback",
+            drained_ticks=1,
+            generation=2,
+        )
+
+    report = Phase2AcceptanceService(Repository(database)).evaluate()
+    shadow = next(check for check in report.checks if check.name == "shadow_72h_coverage")
+    assert shadow.ok, shadow.detail
+    assert shadow.evidence["oversized_gaps"]
+    assert shadow.evidence["qualifying_segments"]
+    assert report.verdict == VERDICT_ACCEPTED
+
+
 def test_one_overlong_cycle_cannot_stand_in_for_monitoring(tmp_path: Path) -> None:
     database = _full_evidence_db(tmp_path / "overlong-shadow.db")
     with database.transaction() as connection:

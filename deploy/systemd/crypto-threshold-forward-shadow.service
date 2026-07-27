@@ -1,0 +1,39 @@
+[Unit]
+Description=Crypto Threshold forward daily-label read-only shadow collector
+Wants=network-online.target systemd-time-wait-sync.service
+After=network-online.target systemd-time-wait-sync.service
+ConditionPathExists=/etc/polymarket-crypto-forward.env
+StartLimitIntervalSec=600
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=crypto-threshold
+Group=crypto-threshold
+WorkingDirectory=/opt/polymarket-crypto-threshold
+EnvironmentFile=/etc/polymarket-crypto-forward.env
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+UnsetEnvironment=HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy all_proxy no_proxy BINANCE_STREAM_PROXY_URL POLYMARKET_PRIVATE_KEY POLYMARKET_FUNDER
+ExecStart=/opt/polymarket-crypto-threshold/.venv/bin/crypto-threshold shadow --duration-hours 336
+Restart=on-failure
+RestartSec=15
+KillSignal=SIGINT
+TimeoutStopSec=45
+UMask=0077
+
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateTmp=true
+ProtectControlGroups=true
+ProtectHome=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectSystem=strict
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictRealtime=true
+RestrictSUIDSGID=true
+ReadWritePaths=/opt/polymarket-crypto-threshold/data /opt/polymarket-crypto-threshold/backups
+
+[Install]
+WantedBy=multi-user.target

@@ -10,7 +10,7 @@ import json
 import math
 from contextlib import closing
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -581,10 +581,11 @@ class Phase2AcceptanceService:
         intervals.sort(key=lambda item: (item[0], item[1], item[2]))
         first = min(starts)
         last = max(ends)
-        span = last - first
-        hours = span.total_seconds() / 3600.0
         gaps: list[dict[str, Any]] = []
+        segments: list[dict[str, Any]] = []
+        segment_start = intervals[0][0]
         coverage_end = intervals[0][1]
+        segment_cycle_count = 1
         for started, completed, cycle_id in intervals[1:]:
             gap_seconds = max(0.0, (started - coverage_end).total_seconds())
             if gap_seconds > MAX_SHADOW_GAP_SECONDS:
@@ -596,21 +597,43 @@ class Phase2AcceptanceService:
                         "next_started_at": started.isoformat(),
                     }
                 )
+                segments.append(
+                    _shadow_segment(
+                        segment_start,
+                        coverage_end,
+                        segment_cycle_count,
+                    )
+                )
+                segment_start = started
+                coverage_end = completed
+                segment_cycle_count = 1
+                continue
             coverage_end = max(coverage_end, completed)
-        ok = (
-            span >= timedelta(hours=MIN_SHADOW_HOURS)
-            and len(cycles) >= 2
-            and not gaps
-            and not overlong_cycles
+            segment_cycle_count += 1
+        segments.append(
+            _shadow_segment(segment_start, coverage_end, segment_cycle_count)
         )
+        qualifying_segments = [
+            segment
+            for segment in segments
+            if segment["cycle_count"] >= 2
+            and segment["coverage_hours"] >= MIN_SHADOW_HOURS
+        ]
+        longest_hours = max(
+            (float(segment["coverage_hours"]) for segment in segments),
+            default=0.0,
+        )
+        ok = bool(qualifying_segments) and not overlong_cycles
         return AcceptanceCheck(
             "shadow_72h_coverage",
             ok,
             (
-                f"shadow cycles span {hours:.2f} hours across {len(cycles)} cycles"
+                f"at least one continuous shadow segment spans "
+                f"{longest_hours:.2f} hours across {len(cycles)} total cycles"
                 if ok
                 else (
-                    f"shadow coverage is {hours:.2f} hours over {len(cycles)} cycles; "
+                    f"longest continuous shadow segment is {longest_hours:.2f} hours "
+                    f"over {len(cycles)} total cycles; "
                     f"need at least {MIN_SHADOW_HOURS} hours with no gap above "
                     f"{MAX_SHADOW_GAP_SECONDS} seconds and no cycle above "
                     f"{MAX_SHADOW_CYCLE_SECONDS} seconds; "
@@ -622,12 +645,18 @@ class Phase2AcceptanceService:
                 "cycle_count": len(cycles),
                 "first_started_at": first.isoformat(),
                 "last_completed_at": last.isoformat(),
-                "coverage_hours": round(hours, 4),
+                "coverage_hours": round(longest_hours, 4),
+                "total_span_hours": round(
+                    (last - first).total_seconds() / 3600.0,
+                    4,
+                ),
                 "required_hours": MIN_SHADOW_HOURS,
                 "max_allowed_gap_seconds": MAX_SHADOW_GAP_SECONDS,
                 "max_allowed_cycle_seconds": MAX_SHADOW_CYCLE_SECONDS,
                 "oversized_gaps": gaps[:20],
                 "overlong_cycles": overlong_cycles[:20],
+                "segments": segments[:20],
+                "qualifying_segments": qualifying_segments[:20],
             },
         )
 
@@ -820,6 +849,22 @@ class Phase2AcceptanceService:
                 "source_version": SCHEMA_DRIFT_SOURCE_VERSION,
             },
         )
+
+
+def _shadow_segment(
+    started_at: datetime,
+    completed_at: datetime,
+    cycle_count: int,
+) -> dict[str, Any]:
+    return {
+        "started_at": started_at.isoformat(),
+        "completed_at": completed_at.isoformat(),
+        "cycle_count": cycle_count,
+        "coverage_hours": round(
+            (completed_at - started_at).total_seconds() / 3600.0,
+            4,
+        ),
+    }
 
 
 def _required_tables_for_schema(schema_version: object) -> frozenset[str]:

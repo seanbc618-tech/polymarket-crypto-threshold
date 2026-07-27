@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily Crypto Threshold forward SQLite evidence backup
+
+[Timer]
+OnCalendar=*-*-* 04:20:00
+Persistent=true
+Unit=crypto-threshold-forward-backup.service
+
+[Install]
+WantedBy=timers.target
