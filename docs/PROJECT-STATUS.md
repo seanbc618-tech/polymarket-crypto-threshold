@@ -45,11 +45,11 @@ for the immutable window `openPrice`; RTDS supplies only the current tick and
 trailing volatility. Settlement independently requires the endpoint's
 completed `openPrice`/`closePrice`, Gamma's `priceToBeat`/`finalPrice`, and the
 resolved outcome to agree. The boundary fix was activated from marker
-`0bae0b7`; the current filesystem marker is `4f34b8f` after an offline
-replay-only update that did not restart services. Up/Down remains PID `136544`;
-Daily remained inactive after its bounded completion and forward retained PID
-`132082`. This correction does not rewrite or legitimize the 83 historical
-mismatched signal rows.
+`0bae0b7`; the current filesystem marker is `6002bc4` after offline replay and
+fixed-holdout calibration updates that did not restart services. Up/Down
+remains PID `136544`; Daily remained inactive after its bounded completion and
+forward retained PID `132082`. This correction does not rewrite or legitimize
+the 83 historical mismatched signal rows.
 
 On 2026-07-26, the Up/Down service was briefly restarted twice with explicit
 owner approval. Commit `b8e69d2` first added schema v5 settlement state; commit
@@ -555,6 +555,18 @@ project review and never authorizes live capital or Phase 3 trading work.
   returned `PENDING`, `eligible_items=2572`, and
   `eligible_unique_labels=25/30`; the forward DB still contained zero replay
   datasets and its latest observed cycle remained `complete_rest_fallback`.
+- Commit `6002bc4` completed the frozen-training-to-combined-replay reference
+  chain, fixed-holdout calibration v3, strict all-training-label availability,
+  replay-item timestamp hashing, and independent acceptance recomputation. It
+  passed `242` tests, Ruff, mypy over 53 source files, and `git diff --check`,
+  then was deployed at `2026-07-27T14:21Z` without restarting either service.
+  The marker and newly imported source versions were `6002bc4`,
+  `replay-manifest-v3`, and `fixed-holdout-calibration-v3`; PIDs remained
+  `132082` and `136544` with zero restarts. The exact read-only plan remained
+  `PENDING` at `2572` eligible items and `25/30` eligible unique labels.
+  Forward still had zero replay datasets, zero calibration runs, no forbidden
+  trading tables, and a latest `complete_rest_fallback` cycle with 20
+  discovered, 10 analyzed, and zero hypothetical paper entries.
 - The Up/Down snapshot's reported `boundary_mismatch=83` means 83 repeated
   signal rows across nine unique settled markets, not 83 markets. The rows
   comprise 65 analyzed and 18 rejected decisions across BNB, DOGE, ETH, HYPE,

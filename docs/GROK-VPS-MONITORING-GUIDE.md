@@ -42,7 +42,7 @@ do not attempt a fix. Return the report using the guide's fixed template.
 | Up/Down service | `crypto-threshold-updown-shadow.service` |
 | Up/Down DB | `/opt/polymarket-crypto-threshold/data/updown-shadow.db` |
 | Up/Down backup timer | `crypto-threshold-updown-backup.timer` |
-| Current deployment baseline | `4f34b8f` |
+| Current deployment baseline | `6002bc4` |
 
 The daily service was a bounded 73-hour evidence run. It completed naturally
 on 2026-07-27 at 14:40 CST after reporting 1,353 process-attributable cycles.
@@ -59,11 +59,11 @@ history predates its service start by design.
 The Up/Down service is intentionally continuous. Unless the owner explicitly
 stopped it, it should remain `active/running`.
 
-Commit `4f34b8f` changed only offline replay planning/building code, tests, and
-documentation. It was deployed without restarting Forward or Up/Down, so their
-loaded processes can legitimately predate the filesystem marker. Report both
-the marker and each process start/PID; do not restart either service to make
-them match.
+Commit `6002bc4` changed only offline replay planning/building, fixed-holdout
+calibration, mechanical acceptance, tests, and documentation. It was deployed
+without restarting Forward or Up/Down, so their loaded processes can
+legitimately predate the filesystem marker. Report both the marker and each
+process start/PID; do not restart either service to make them match.
 
 ## Absolute Safety Boundary
 
@@ -126,7 +126,7 @@ cat /opt/polymarket-crypto-threshold/.deployed-commit
 Expected:
 
 - NTP prints `yes`.
-- The deployment marker is `4f34b8f`, unless
+- The deployment marker is `6002bc4`, unless
   `docs/PROJECT-STATUS.md` records a newer reviewed deployment.
 - `Observed at` in the final report must be the read-window end, not the time
   the SSH session or first command started.
