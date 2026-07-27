@@ -36,16 +36,25 @@ do not attempt a fix. Return the report using the guide's fixed template.
 | Daily service | `crypto-threshold-shadow.service` |
 | Daily DB | `/opt/polymarket-crypto-threshold/data/phase2-vps.db` |
 | Daily backup timer | `crypto-threshold-backup.timer` |
+| Forward service | `crypto-threshold-forward-shadow.service` |
+| Forward DB | `/opt/polymarket-crypto-threshold/data/phase2-forward.db` |
+| Forward backup timer | `crypto-threshold-forward-backup.timer` |
 | Up/Down service | `crypto-threshold-updown-shadow.service` |
 | Up/Down DB | `/opt/polymarket-crypto-threshold/data/updown-shadow.db` |
 | Up/Down backup timer | `crypto-threshold-updown-backup.timer` |
-| Current deployment baseline | `8866fb2` |
+| Current deployment baseline | `4af0727` |
 
 The daily service was a bounded 73-hour evidence run. It completed naturally
 on 2026-07-27 at 14:40 CST after reporting 1,353 process-attributable cycles.
 Its expected state is now `inactive/dead` with `Result=success`,
 `ExecMainStatus=0`, and zero restarts. Never restart it. Report any later
 active state as unexpected and hand it to the owner/Codex.
+
+The forward daily-label collector started on 2026-07-27 at 16:47:32 CST from a
+verified copy of the completed Daily evidence. It is bounded to 14 days, uses a
+15-minute cadence, and should be `active/running` until it is explicitly stopped
+after enough training and later OOS labels or reaches its bound. Its copied
+history predates its service start by design.
 
 The Up/Down service is intentionally continuous. Unless the owner explicitly
 stopped it, it should remain `active/running`.
@@ -92,7 +101,7 @@ ssh -i /Users/xiafan/.ssh/id_ed25519_polymarket_vps \
   sean@38.76.191.251
 ```
 
-If SSH fails, report `UNKNOWN: SSH unavailable`. Do not claim either service is
+If SSH fails, report `UNKNOWN: SSH unavailable`. Do not claim any service is
 down.
 
 All commands below run inside the VPS SSH session.
@@ -108,7 +117,7 @@ cat /opt/polymarket-crypto-threshold/.deployed-commit
 Expected:
 
 - NTP prints `yes`.
-- The deployment marker is `8866fb2`, unless
+- The deployment marker is `4af0727`, unless
   `docs/PROJECT-STATUS.md` records a newer reviewed deployment.
 - `Observed at` in the final report must be the read-window end, not the time
   the SSH session or first command started.
@@ -120,6 +129,7 @@ Do not change a mismatched marker.
 ```bash
 systemctl show \
   crypto-threshold-shadow.service \
+  crypto-threshold-forward-shadow.service \
   crypto-threshold-updown-shadow.service \
   --property=Id,ActiveState,SubState,Result,MainPID,NRestarts,ExecMainStatus,ExecMainStartTimestamp,InactiveEnterTimestamp \
   --no-pager
@@ -130,9 +140,12 @@ Interpretation:
 - Daily before its scheduled completion: `active/running` is PASS.
 - Daily after its scheduled completion: `inactive/dead`, `Result=success`, and
   `ExecMainStatus=0` is `EXPECTED_COMPLETE`, not a reason to restart.
+- Forward: `active/running` is PASS until its explicit early stop or 14-day
+  bound. `inactive/dead` with success is expected only after one of those
+  documented completion conditions.
 - Up/Down: `active/running` is PASS.
 - `failed`, non-zero exit, or any restart increase is FAIL.
-- Current known restart baseline is zero for both services.
+- Current known restart baseline is zero for all three services.
 - `ExecMainStartTimestamp` is the service process start. When a service is
   active, `InactiveEnterTimestamp` is historical systemd state and must not be
   treated as its current start or completion time.
@@ -144,12 +157,17 @@ Interpretation:
   `ExecMainStartTimestamp`. If the database begins earlier, report
   `DB_HISTORY_PREDATES_SERVICE_START` and do not use the database minimum as
   the continuous service-window start without documented provenance.
+- Forward is the documented exception: it was copied from the verified final
+  Daily backup, so report `DERIVED_HISTORY_FROM_FINAL_BACKUP`. The completed
+  73.06-hour segment remains historical evidence; do not describe the entire
+  combined database span as one uninterrupted forward process.
 
 ### 3. Recent Logs
 
 ```bash
 sudo journalctl \
   -u crypto-threshold-shadow.service \
+  -u crypto-threshold-forward-shadow.service \
   -u crypto-threshold-updown-shadow.service \
   --since "2 hours ago" \
   --priority=err \
@@ -160,6 +178,14 @@ sudo journalctl \
 ```bash
 sudo journalctl \
   -u crypto-threshold-shadow.service \
+  -n 20 \
+  --no-pager \
+  -o short-iso
+```
+
+```bash
+sudo journalctl \
+  -u crypto-threshold-forward-shadow.service \
   -n 20 \
   --no-pager \
   -o short-iso
@@ -201,6 +227,9 @@ from pathlib import Path
 DATABASES = {
     "daily": Path(
         "/opt/polymarket-crypto-threshold/data/phase2-vps.db"
+    ),
+    "forward": Path(
+        "/opt/polymarket-crypto-threshold/data/phase2-forward.db"
     ),
     "updown": Path(
         "/opt/polymarket-crypto-threshold/data/updown-shadow.db"
@@ -520,7 +549,8 @@ Freshness thresholds while a service is active:
 
 | Database | PASS | WARN | FAIL |
 |---|---:|---:|---:|
-| Daily latest cycle | at most 10 minutes old | 10-20 minutes | over 20 minutes |
+| Daily frozen source | 1,355 cycles unchanged | unit active without a new row | any cursor advance |
+| Forward latest cycle | at most 25 minutes old | 25-40 minutes | over 40 minutes |
 | Up/Down latest cycle | at most 5 minutes old | 5-10 minutes | over 10 minutes |
 
 Additional interpretation:
@@ -571,12 +601,19 @@ Additional interpretation:
   or insufficient volatility history are fail-closed research outcomes.
 - Repeated cycles with all 14 signals rejected after warm-up are WARN and need
   Codex review, even when the service process remains active.
+- Forward began with 20 daily settlement labels after its first cycle. Report
+  the current label count and delta from 20. Reaching 30 labels is only a
+  training-data checkpoint; it is not Phase 2 acceptance and does not remove
+  the need for a later OOS window, replay, calibration, and metrics.
+- The frozen Daily baselines are 1,355 cycles, 134,030 external payloads, and
+  10 settlement labels. Any increase is FAIL because that source is immutable.
 
 ### 5. Backup Timers And Files
 
 ```bash
 systemctl show \
   crypto-threshold-backup.timer \
+  crypto-threshold-forward-backup.timer \
   crypto-threshold-updown-backup.timer \
   --property=Id,ActiveState,SubState,UnitFileState,NextElapseUSecRealtime,LastTriggerUSec \
   --no-pager
@@ -585,6 +622,11 @@ systemctl show \
 ```bash
 sudo -u crypto-threshold \
   ls -lht /opt/polymarket-crypto-threshold/backups
+```
+
+```bash
+sudo -u crypto-threshold \
+  ls -lht /opt/polymarket-crypto-threshold/backups/forward
 ```
 
 ```bash
@@ -600,12 +642,15 @@ sudo -u crypto-threshold sh -c \
 
 Expected:
 
-- Both timers are `active/waiting` and `enabled`.
+- The completed Daily timer is expected to be `inactive/dead` and disabled
+  after its final backup. Forward and Up/Down timers must be `active/waiting`
+  and enabled.
 - The final `find` command prints nothing.
 - A `.partial`, `.partial-wal`, or `.partial-shm` file is WARN. Report the exact
   absolute path, distinguish daily root from `backups/updown`, and do not
   delete it.
-- A missing scheduled backup or a backup older than 26 hours is WARN.
+- A missing scheduled Forward or Up/Down backup, after its first scheduled
+  trigger, or a backup older than 26 hours is WARN.
 - Report each backup's age at the read-window end and the 26-hour threshold.
   Do not estimate age from a filename while using an earlier observation time.
 
@@ -629,8 +674,9 @@ Use one overall verdict:
   unhandled exception.
 - `UNKNOWN`: SSH or permissions prevented observation. Never convert UNKNOWN
   into PASS or FAIL by guessing.
-- `EXPECTED_COMPLETE`: The bounded daily service ended successfully after its
-  planned run. This still requires owner/Codex backup and acceptance review.
+- `EXPECTED_COMPLETE`: The bounded Daily service ended successfully and its
+  final backup was verified. This status does not override a Forward or
+  Up/Down failure.
 
 No monitoring result may declare:
 
@@ -670,6 +716,22 @@ Daily service
 - Last 5 cycle statuses:
 - Signal status counts:
 
+Forward service
+- ActiveState/SubState:
+- Result/ExecMainStatus:
+- MainPID:
+- NRestarts:
+- ExecMainStartTimestamp:
+- Filesystem marker vs loaded process:
+- DB schema:
+- Cycle count and time range:
+- Derived-history provenance:
+- Latest cycle age:
+- Expected completion / remaining time:
+- Last 5 cycle statuses:
+- Signal status counts:
+- Settlement label count / delta from 20:
+
 Up/Down service
 - ActiveState/SubState:
 - Result/ExecMainStatus:
@@ -698,6 +760,7 @@ Up/Down service
 
 Backups
 - Daily timer:
+- Forward timer:
 - Up/Down timer:
 - Latest backup timestamps:
 - Backup age at read-window end / threshold:
@@ -725,17 +788,18 @@ Do not paste huge logs; include the relevant 10-30 lines and their timestamps.
 
 Escalate to the owner/Codex without attempting repair when any of these occurs:
 
-- Daily service ends before its expected bound or exits non-zero
+- Completed Daily service becomes active or its database gains new rows
+- Forward service ends before an explicit stop or its bound, exits non-zero,
+  or restarts
 - Up/Down service is not active
-- Either service restarts
+- Up/Down service restarts
 - Three consecutive cycles are degraded or fail
 - Evidence freshness crosses a FAIL threshold
 - Both 5m and 15m remain fully rejected after warm-up and one recheck
 - NTP changes from `yes`
 - A forbidden table, mismatch, corruption, traceback, OOM, or disk-full message
   appears
-- A timer is disabled or a scheduled backup is missing
-- The bounded daily run completes successfully
-
-When the daily run completes, remind the owner that old local history still
-must not be deleted until the final VPS backup and evidence review are complete.
+- A required Forward/UpDown timer is disabled or its scheduled backup is
+  missing
+- Forward reaches at least 30 labels so the owner/Codex can freeze the training
+  boundary and define the later OOS window

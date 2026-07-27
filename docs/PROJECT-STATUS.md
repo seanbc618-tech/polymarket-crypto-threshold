@@ -20,9 +20,11 @@ The current local development network requires an explicit outbound proxy for
 Binance WebSocket access; the proxied stream produced valid BTCUSDT and ETHUSDT
 1m Close ticks. The separate direct-connect Hong Kong VPS deployment completed
 its formal bounded Phase 2 shadow window against a fresh evidence database on
-2026-07-27. Continuous coverage and reconnect evidence passed. The database
-still contains only 10 unique settlement labels and no sealed VPS replay or
-out-of-sample calibration. These are evidence gaps, not successes.
+2026-07-27. Continuous coverage and reconnect evidence passed. Its immutable
+source contains 10 unique settlement labels. A separate v5 working copy is now
+collecting forward evidence and reached 20 labels on its first cycle, but it
+still has no sealed VPS replay or out-of-sample calibration. These are evidence
+gaps, not successes.
 
 A separate read-only research expansion now supports the currently observed
 5-minute and 15-minute Polymarket Up/Down contract family for BTC, ETH, SOL,
@@ -68,6 +70,10 @@ path, or position mutation exists in the runtime. Setting
   environment. It remains `TRADING_DISABLED=true`, uses
   `POLYMARKET_STREAM_USER_CHANNEL_ENABLED=false`, and writes only to
   `/opt/polymarket-crypto-threshold/data/phase2-vps.db`.
+- The bounded forward process uses the same public-only Daily contract and
+  provider settings at a 15-minute cadence. It writes only to
+  `/opt/polymarket-crypto-threshold/data/phase2-forward.db`, has a 14-day hard
+  bound, and never writes the completed source database or final backup.
 - The independent short-Up/Down process has the same no-secret/no-proxy safety
   boundary, disables Binance streaming, enables only the public Chainlink
   reference stream, and writes only to
@@ -158,6 +164,12 @@ path, or position mutation exists in the runtime. Setting
   Binance stream evidence. Stored calibration counts are checked against unique
   replay labels and actual OOS chronology; sparse endpoints cannot impersonate
   a 72-hour continuous run.
+- The acceptance schema gate explicitly supports historical v3/v4 and current
+  v5 evidence. Tables are required from the version in which they were
+  introduced; v5 still requires `settlement_attempts`, and unknown versions
+  fail closed. A later collection gap does not erase a previously completed
+  continuous 72-hour segment, while sparse endpoints still cannot manufacture
+  such a segment.
 - Every shadow cycle checks newly persisted Gamma, CLOB, Binance, and Coinbase
   raw payloads against versioned transport contracts. Counts, source versions,
   and drift codes are stored in the existing cycle health JSON without a second
@@ -425,10 +437,28 @@ project review and never authorizes live capital or Phase 3 trading work.
   no-trading surface, and Binance stream/reconnect evidence passed. Schema
   compatibility, sealed replay, chronological OOS calibration, and metrics
   failed.
-- The final database is approximately 2.85 GB. The latest scheduled daily
-  backup predates process completion, so a final WAL-consistent backup, hash,
-  and integrity check are still required before deleting any old local smoke
-  history.
+- The final database is approximately 2.85 GB. Its WAL-consistent final backup
+  is
+  `/opt/polymarket-crypto-threshold/backups/final/crypto-threshold-20260727T083224.030493Z.db`
+  with SHA-256
+  `14b765acf51475b071cf086a68773576cb50ab3d77d7af28cb75d5db69c9d20e`,
+  mode `0600`, `integrity_check=ok`, zero foreign-key violations, and no
+  row-count or key-cursor differences across the 16 source tables. The original
+  source hash and mtime remained unchanged. The old static Daily backup timer
+  is now disabled to avoid duplicating a frozen 2.85 GB file.
+- Commits `c45fc0b` and `4af0727` added version-aware acceptance, continuous
+  segment detection, and the bounded forward collector. Local verification was
+  `224 passed`; Ruff reported no findings, mypy reported no issues in 52 source
+  files, and `git diff --check` was clean.
+- The final backup was copied byte-for-byte into
+  `/opt/polymarket-crypto-threshold/data/phase2-forward.db`, then only that
+  working copy was migrated to schema v5. All 16 existing table row counts
+  remained identical and only the empty `settlement_attempts` table was added.
+  `doctor` passed database, public Gamma/CLOB/Binance/Coinbase access, and live
+  NO-GO. The forward unit started at `2026-07-27T08:47:32Z` on PID `132082`
+  with zero restarts; its first cycle completed through REST fallback with
+  20 discovered, 10 analyzed workflows, zero hypothetical paper enters, no
+  forbidden tables, and 10 newly persisted labels for a total of 20.
 - The Up/Down snapshot's reported `boundary_mismatch=83` means 83 repeated
   signal rows across nine unique settled markets, not 83 markets. The rows
   comprise 65 analyzed and 18 rejected decisions across BNB, DOGE, ETH, HYPE,
@@ -489,30 +519,23 @@ project review and never authorizes live capital or Phase 3 trading work.
   authoritative.
 - Coinbase USD versus Binance USDT is only a sanity comparison, not the
   settlement source.
-- The local sealed replay covers five unique settlement labels; the completed
-  VPS database has 10 labels but no sealed replay or valid out-of-sample
+- The local sealed replay covers five unique settlement labels; the immutable
+  VPS source has 10 labels and its forward working copy currently has 20, but
+  neither VPS artifact yet has a sealed replay or valid out-of-sample
   calibration window.
 - API schemas and fee behavior can change; parser and adapter versions make
   resulting records auditable but do not remove schema-drift risk.
 
 ## Next Gate
 
-Create a final WAL-consistent backup of the completed daily database, record its
-hash and integrity result, and preserve the original schema-v3 source
-unchanged. Then fix the acceptance checker's historical-schema compatibility:
-schema v5 and `settlement_attempts` were added later for settlement scheduling
-and must not retroactively invalidate otherwise complete schema-v3 daily
-evidence. Prove the compatibility behavior with tests and rerun acceptance on
-the immutable backup or copy. Do not migrate or rewrite the only source
-evidence artifact in place.
-
-Continue collecting forward decisions for new daily contracts, settle them
-after their authoritative Binance candle closes, and rebuild replay until at
-least 30 unique prior labels exist. Then collect and settle a later decision
-batch for the independent OOS window and publish calibration metrics.
-Repeating the five-hour local smoke is unnecessary. Live order placement
-remains explicitly outside this phase and requires a separate design and
-approval.
+Keep the bounded forward collector running until at least 30 unique Daily
+labels exist. At that point freeze and record the training cutoff, build and
+verify the training replay, and do not use later labels to refit that window.
+Continue collecting a separate later OOS decision batch, then rebuild the
+combined chronological replay and publish raw, calibrated, and market-baseline
+metrics. Repeating the five-hour local smoke or the completed continuous 72-hour
+run is unnecessary. Live order placement remains explicitly outside this phase
+and requires a separate design and approval.
 
 In parallel, keep the short-Up/Down evidence in its separate database. Resolve
 the one-second live-boundary versus authoritative `priceToBeat` mismatch
@@ -526,6 +549,6 @@ future; a growing due backlog, repeated attempt errors, or resolution payload
 IDs advancing for an unchanged semantic response requires review. The
 monitoring guide is read-only and must not repair or compact the backlog.
 
-After the formal daily VPS monitor is stopped, backed up, and reviewed, remind
-the operator that the old local smoke history can be deleted. Do not delete it
-while the formal acceptance window is still active.
+The formal Daily source is stopped, backed up, and reviewed. The old local smoke
+history is now eligible for owner-approved deletion; it is no longer needed to
+protect the completed VPS evidence.
