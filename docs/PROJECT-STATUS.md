@@ -22,9 +22,10 @@ Binance WebSocket access; the proxied stream produced valid BTCUSDT and ETHUSDT
 its formal bounded Phase 2 shadow window against a fresh evidence database on
 2026-07-27. Continuous coverage and reconnect evidence passed. Its immutable
 source contains 10 unique settlement labels. A separate v5 working copy is now
-collecting forward evidence and reached 20 labels on its first cycle, but it
-still has no sealed VPS replay or out-of-sample calibration. These are evidence
-gaps, not successes.
+collecting forward evidence. It currently has 31 raw labels but only 25
+replay-eligible labels with matching analyzed decisions, so it still has no
+sealed VPS replay or out-of-sample calibration. These are evidence gaps, not
+successes.
 
 A separate read-only research expansion now supports the currently observed
 5-minute and 15-minute Polymarket Up/Down contract family for BTC, ETH, SOL,
@@ -43,10 +44,12 @@ Polymarket's public crypto-window response is the signal and settlement source
 for the immutable window `openPrice`; RTDS supplies only the current tick and
 trailing volatility. Settlement independently requires the endpoint's
 completed `openPrice`/`closePrice`, Gamma's `priceToBeat`/`finalPrice`, and the
-resolved outcome to agree. The deployment marker is `0bae0b7` and the new
-Up/Down process is PID `136544`; Daily remained inactive after its bounded
-completion and forward retained PID `132082`. This correction does not rewrite
-or legitimize the 83 historical mismatched signal rows.
+resolved outcome to agree. The boundary fix was activated from marker
+`0bae0b7`; the current filesystem marker is `4f34b8f` after an offline
+replay-only update that did not restart services. Up/Down remains PID `136544`;
+Daily remained inactive after its bounded completion and forward retained PID
+`132082`. This correction does not rewrite or legitimize the 83 historical
+mismatched signal rows.
 
 On 2026-07-26, the Up/Down service was briefly restarted twice with explicit
 owner approval. Commit `b8e69d2` first added schema v5 settlement state; commit
@@ -531,6 +534,13 @@ project review and never authorizes live capital or Phase 3 trading work.
   `(label_received_at, label_id)`, persists the exact label list and cutoff in
   the immutable manifest, and refuses to seal anything when fewer than 30 are
   eligible. Offline verification also validates the v2 selection metadata.
+- Commit `4f34b8f` passed `235` tests, Ruff, mypy over 53 source files, and
+  `git diff --check`, then was deployed as the VPS filesystem marker without
+  restarting Forward or Up/Down. Their PIDs remained `132082` and `136544`,
+  both active/running with zero restarts. The deployed exact read-only command
+  returned `PENDING`, `eligible_items=2572`, and
+  `eligible_unique_labels=25/30`; the forward DB still contained zero replay
+  datasets and its latest observed cycle remained `complete_rest_fallback`.
 - The Up/Down snapshot's reported `boundary_mismatch=83` means 83 repeated
   signal rows across nine unique settled markets, not 83 markets. The rows
   comprise 65 analyzed and 18 rejected decisions across BNB, DOGE, ETH, HYPE,

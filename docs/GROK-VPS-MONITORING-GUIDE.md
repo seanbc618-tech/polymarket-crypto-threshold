@@ -42,7 +42,7 @@ do not attempt a fix. Return the report using the guide's fixed template.
 | Up/Down service | `crypto-threshold-updown-shadow.service` |
 | Up/Down DB | `/opt/polymarket-crypto-threshold/data/updown-shadow.db` |
 | Up/Down backup timer | `crypto-threshold-updown-backup.timer` |
-| Current deployment baseline | `0bae0b7` |
+| Current deployment baseline | `4f34b8f` |
 
 The daily service was a bounded 73-hour evidence run. It completed naturally
 on 2026-07-27 at 14:40 CST after reporting 1,353 process-attributable cycles.
@@ -58,6 +58,12 @@ history predates its service start by design.
 
 The Up/Down service is intentionally continuous. Unless the owner explicitly
 stopped it, it should remain `active/running`.
+
+Commit `4f34b8f` changed only offline replay planning/building code, tests, and
+documentation. It was deployed without restarting Forward or Up/Down, so their
+loaded processes can legitimately predate the filesystem marker. Report both
+the marker and each process start/PID; do not restart either service to make
+them match.
 
 ## Absolute Safety Boundary
 
@@ -79,8 +85,11 @@ Forbidden operations:
 - `git pull`, `fetch`, `checkout`, `reset`, `rebase`, `merge`, or deployment
 - Opening SQLite without `mode=ro`; any migration, `VACUUM`, checkpoint, or
   data update
-- Running `doctor`, `phase2-acceptance`, settlement, replay, calibration, or
-  backup commands unless the owner separately requests them
+- Running `doctor`, `phase2-acceptance`, settlement, `replay-build`,
+  `replay-verify`, calibration, or backup commands unless the owner separately
+  requests them. The exact `replay-plan` command below is the sole permitted
+  replay exception because it opens the existing DB read-only and never seals
+  a dataset.
 - Reading `/etc/polymarket-crypto-*.env`, `/proc/*/environ`, Keychain, private
   keys, funder data, API credentials, or authenticated endpoints
 - Sending BUY/SELL, signing, cancellation, reconciliation, or account requests
@@ -117,7 +126,7 @@ cat /opt/polymarket-crypto-threshold/.deployed-commit
 Expected:
 
 - NTP prints `yes`.
-- The deployment marker is `0bae0b7`, unless
+- The deployment marker is `4f34b8f`, unless
   `docs/PROJECT-STATUS.md` records a newer reviewed deployment.
 - `Observed at` in the final report must be the read-window end, not the time
   the SSH session or first command started.
@@ -682,9 +691,23 @@ Additional interpretation:
 - Repeated cycles with all 14 signals rejected after warm-up are WARN and need
   Codex review, even when the service process remains active.
 - Forward began with 20 daily settlement labels after its first cycle. Report
-  the current label count and delta from 20. Reaching 30 labels is only a
-  training-data checkpoint; it is not Phase 2 acceptance and does not remove
-  the need for a later OOS window, replay, calibration, and metrics.
+  the current raw label count and delta from 20, then run the exact read-only
+  eligibility check:
+
+```bash
+sudo -n -u crypto-threshold \
+  /opt/polymarket-crypto-threshold/.venv/bin/crypto-threshold \
+  replay-plan \
+  --db /opt/polymarket-crypto-threshold/data/phase2-forward.db \
+  --training-label-count 30
+```
+
+  Exit `0/READY` means the owner/Codex can freeze the training cutoff on an
+  independent snapshot. Exit `1/PENDING` is healthy and must report the exact
+  `eligible_unique_labels=N/30`; exit `2` is FAIL. Raw labels without an
+  eligible analyzed decision do not count. READY is only a training-data
+  checkpoint; it is not Phase 2 acceptance and does not remove the need for a
+  later OOS window, replay, calibration, and metrics.
 - The frozen Daily baselines are 1,355 cycles, 134,030 external payloads, and
   10 settlement labels. Any increase is FAIL because that source is immutable.
 
@@ -811,6 +834,7 @@ Forward service
 - Last 5 cycle statuses:
 - Signal status counts:
 - Settlement label count / delta from 20:
+- Replay plan verdict / eligible unique labels:
 
 Up/Down service
 - ActiveState/SubState:
@@ -882,5 +906,5 @@ Escalate to the owner/Codex without attempting repair when any of these occurs:
   appears
 - A required Forward/UpDown timer is disabled or its scheduled backup is
   missing
-- Forward reaches at least 30 labels so the owner/Codex can freeze the training
-  boundary and define the later OOS window
+- Forward `replay-plan` becomes `READY` at 30/30 eligible unique labels so the
+  owner/Codex can freeze the training boundary and define the later OOS window
