@@ -734,12 +734,20 @@ capital or Phase 3 trading work.
 Phase 2 read-only research acceptance is complete. Do not start live Phase 3
 trading work from this result. The next research gate is model validity: keep
 the existing forward collector available for a larger, event-diverse OOS set
-across multiple settlement dates and both supported assets, predefine an
+across multiple settlement dates and the supported Daily assets, predefine an
 independent-event minimum, and test any calibration challenger against the raw
 model and Polymarket baseline without refitting the accepted frozen window.
 Repeating the five-hour local smoke or the completed continuous 72-hour run is
 unnecessary. Live order placement remains explicitly outside the approved
 scope and requires a separate design, stronger evidence, and owner approval.
+
+The predeclared event-diverse checkpoint is at least 20 distinct
+`(asset, target_time_utc)` groups across at least seven settlement dates, with
+BTC, ETH, SOL, and XRP all represented and at least four groups per asset.
+Multiple strikes in one ladder count as one event group. The accepted five-label
+BTC ladder therefore starts this checkpoint at `1/20` groups, `1/7` dates, and
+one of four assets. The 336-hour Forward collector remains bounded through
+approximately `2026-08-11T06:10:20+08:00`.
 
 In parallel, keep the short-Up/Down evidence in its separate database. The
 authoritative-boundary correction is deployed without weakening replay

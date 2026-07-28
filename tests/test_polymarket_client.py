@@ -28,12 +28,16 @@ def test_discovery_queries_both_threshold_directions() -> None:
 
     transport = httpx.MockTransport(handler)
     settings = Settings(_env_file=None)
-    client = GammaClobReadClient(settings, client=httpx.Client(transport=transport))
+    client = GammaClobReadClient(
+        settings,
+        client=httpx.Client(transport=transport),
+        clock=lambda: datetime(2026, 7, 23, 14, 0, tzinfo=UTC),
+    )
     markets = client.discover_markets("BTC", 4)
     assert {market["id"] for market in markets} == {"market-above", "market-below"}
     assert {request.url.params["q"] for request in requests} == {
-        "Bitcoin above",
-        "Bitcoin below",
+        "Bitcoin above July 23 2026",
+        "Bitcoin below July 23 2026",
     }
     assert all(request.url.params["events_status"] == "active" for request in requests)
     assert all(request.url.params["keep_closed_markets"] == "0" for request in requests)
@@ -57,9 +61,86 @@ def test_discovery_supports_each_additional_daily_asset(
     client = GammaClobReadClient(
         Settings(_env_file=None),
         client=httpx.Client(transport=httpx.MockTransport(handler)),
+        clock=lambda: datetime(2026, 7, 23, 14, 0, tzinfo=UTC),
     )
     assert client.discover_markets(asset, 4) == []
-    assert set(queries) == {f"{name} above", f"{name} below"}
+    assert set(queries) == {
+        f"{name} above July 23 2026",
+        f"{name} below July 23 2026",
+    }
+
+
+@pytest.mark.parametrize(
+    ("now", "expected_date"),
+    [
+        (datetime(2026, 1, 15, 16, 59, tzinfo=UTC), "January 15 2026"),
+        (datetime(2026, 1, 15, 17, 0, tzinfo=UTC), "January 16 2026"),
+        (datetime(2026, 7, 29, 15, 59, tzinfo=UTC), "July 29 2026"),
+        (datetime(2026, 7, 29, 16, 0, tzinfo=UTC), "July 30 2026"),
+    ],
+)
+def test_daily_discovery_rolls_at_noon_new_york(
+    now: datetime,
+    expected_date: str,
+) -> None:
+    queries: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        queries.append(str(request.url.params["q"]))
+        return httpx.Response(200, json={"events": []})
+
+    client = GammaClobReadClient(
+        Settings(_env_file=None),
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+        clock=lambda: now,
+    )
+    assert client.discover_markets("BTC", 4) == []
+    assert set(queries) == {
+        f"Bitcoin above {expected_date}",
+        f"Bitcoin below {expected_date}",
+    }
+
+
+def test_daily_discovery_round_robins_assets_before_global_limit() -> None:
+    names = {
+        "Bitcoin": "BTC",
+        "Ethereum": "ETH",
+        "Solana": "SOL",
+        "XRP": "XRP",
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        query = str(request.url.params["q"])
+        name = next(name for name in names if query.startswith(name))
+        direction = "above" if " above " in query else "below"
+        markets = [
+            make_market_payload(
+                id=f"{names[name]}-{direction}-{index}",
+                conditionId=f"{names[name]}-{direction}-condition-{index}",
+            )
+            for index in range(4)
+        ]
+        return httpx.Response(
+            200,
+            json={"events": [{"id": f"{names[name]}-{direction}", "markets": markets}]},
+        )
+
+    client = GammaClobReadClient(
+        Settings(_env_file=None),
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+        clock=lambda: datetime(2026, 7, 29, 16, 0, tzinfo=UTC),
+    )
+    markets = client.discover_markets(None, 8)
+    assert [market["id"] for market in markets] == [
+        "BTC-above-0",
+        "ETH-above-0",
+        "SOL-above-0",
+        "XRP-above-0",
+        "BTC-below-0",
+        "ETH-below-0",
+        "SOL-below-0",
+        "XRP-below-0",
+    ]
 
 
 def test_market_book_and_fee_calls_are_get_only() -> None:

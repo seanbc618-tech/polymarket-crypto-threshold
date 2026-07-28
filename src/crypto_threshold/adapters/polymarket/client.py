@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from collections.abc import Callable
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import httpx
 
@@ -13,16 +15,26 @@ from crypto_threshold.adapters.prices.polymarket_crypto import interval_variant
 from crypto_threshold.config import Settings
 from crypto_threshold.domain.assets import DAILY_THRESHOLD_ASSETS, asset_contract
 
+NEW_YORK = ZoneInfo("America/New_York")
+DAILY_SETTLEMENT_TIME = time(12, 0)
+
 
 class GammaClobReadClient:
     """Read-only adapter for market discovery, books, and fee metadata."""
 
-    def __init__(self, settings: Settings, client: httpx.Client | None = None) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        client: httpx.Client | None = None,
+        *,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
         self.gamma_base = settings.POLYMARKET_GAMMA_API_BASE.rstrip("/")
         self.clob_base = settings.POLYMARKET_CLOB_API_BASE.rstrip("/")
         self.site_api_base = settings.POLYMARKET_SITE_API_BASE.rstrip("/")
         self._client = client or httpx.Client(timeout=settings.HTTP_TIMEOUT_SECONDS)
         self._owns_client = client is None
+        self._clock = clock or (lambda: datetime.now(UTC))
 
     def close(self) -> None:
         if self._owns_client:
@@ -30,41 +42,63 @@ class GammaClobReadClient:
 
     def discover_markets(self, asset: str | None, limit: int) -> list[dict[str, Any]]:
         assets = [asset.upper()] if asset else sorted(DAILY_THRESHOLD_ASSETS)
-        queries: list[str] = []
+        target_date = _next_daily_target_date(self._clock())
+        date_label = f"{target_date.strftime('%B')} {target_date.day} {target_date.year}"
+        per_asset = max(1, (limit + len(assets) - 1) // len(assets))
+        query_limit = max(10, per_asset * 2)
+        buckets: list[list[dict[str, Any]]] = []
         for symbol in assets:
             try:
                 name = asset_contract(symbol).display_name
             except ValueError as exc:
                 raise ValueError(f"unsupported discovery asset: {symbol}") from exc
-            queries.extend((f"{name} above", f"{name} below"))
-        per_query = max(1, (limit + len(queries) - 1) // len(queries))
-        results: list[dict[str, Any]] = []
-        seen: set[str] = set()
-        for query in queries:
-            response = self._client.get(
-                f"{self.gamma_base}/public-search",
-                params={
-                    "q": query,
-                    "events_status": "active",
-                    "keep_closed_markets": 0,
-                    "limit_per_type": per_query,
-                    "search_profiles": False,
-                    "search_tags": False,
-                },
-            )
-            response.raise_for_status()
-            added = 0
-            for item in _search_market_payloads(response.json()):
-                if item.get("active") is False or item.get("closed") is True:
-                    continue
-                key = str(item.get("id") or item.get("conditionId") or item.get("slug") or "")
-                if key and key not in seen:
-                    seen.add(key)
-                    results.append(item)
-                    added += 1
-                if added >= per_query:
+            direction_rows: list[list[dict[str, Any]]] = []
+            for direction in ("above", "below"):
+                response = self._client.get(
+                    f"{self.gamma_base}/public-search",
+                    params={
+                        "q": f"{name} {direction} {date_label}",
+                        "events_status": "active",
+                        "keep_closed_markets": 0,
+                        "limit_per_type": query_limit,
+                        "search_profiles": False,
+                        "search_tags": False,
+                    },
+                )
+                response.raise_for_status()
+                direction_rows.append(
+                    [
+                        item
+                        for item in _search_market_payloads(response.json())
+                        if item.get("active") is not False
+                        and item.get("closed") is not True
+                    ]
+                )
+
+            bucket: list[dict[str, Any]] = []
+            seen_for_asset: set[str] = set()
+            for index in range(max((len(rows) for rows in direction_rows), default=0)):
+                for rows in direction_rows:
+                    if index >= len(rows):
+                        continue
+                    item = rows[index]
+                    key = str(
+                        item.get("id")
+                        or item.get("conditionId")
+                        or item.get("slug")
+                        or ""
+                    )
+                    if not key or key in seen_for_asset:
+                        continue
+                    seen_for_asset.add(key)
+                    bucket.append(item)
+                    if len(bucket) >= per_asset:
+                        break
+                if len(bucket) >= per_asset:
                     break
-        return results[:limit]
+            buckets.append(bucket)
+
+        return _round_robin(buckets, limit=limit)
 
     def discover_updown_markets(
         self,
@@ -239,6 +273,46 @@ class GammaClobReadClient:
         if not isinstance(payload, (int, float, str)):
             raise ValueError("unexpected CLOB server-time response")
         return payload
+
+
+def _next_daily_target_date(now: datetime) -> date:
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=UTC)
+    now_et = now.astimezone(NEW_YORK)
+    target_date = now_et.date()
+    deadline = datetime.combine(
+        target_date,
+        DAILY_SETTLEMENT_TIME,
+        tzinfo=NEW_YORK,
+    )
+    return target_date + timedelta(days=1) if now_et >= deadline else target_date
+
+
+def _round_robin(
+    buckets: list[list[dict[str, Any]]],
+    *,
+    limit: int,
+) -> list[dict[str, Any]]:
+    results: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for index in range(max((len(bucket) for bucket in buckets), default=0)):
+        for bucket in buckets:
+            if index >= len(bucket):
+                continue
+            item = bucket[index]
+            key = str(
+                item.get("id")
+                or item.get("conditionId")
+                or item.get("slug")
+                or ""
+            )
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            results.append(item)
+            if len(results) >= limit:
+                return results
+    return results
 
 
 def _search_market_payloads(payload: Any) -> list[dict[str, Any]]:
