@@ -746,8 +746,29 @@ The predeclared event-diverse checkpoint is at least 20 distinct
 BTC, ETH, SOL, and XRP all represented and at least four groups per asset.
 Multiple strikes in one ladder count as one event group. The accepted five-label
 BTC ladder therefore starts this checkpoint at `1/20` groups, `1/7` dates, and
-one of four assets. The 336-hour Forward collector remains bounded through
-approximately `2026-08-11T06:10:20+08:00`.
+one of four assets.
+
+Commit `52bc4df` replaced relevance-only Daily discovery with an explicit
+America/New_York settlement-date query and round-robin BTC/ETH/SOL/XRP
+selection. It was deployed to the direct-connect VPS and activated for Forward
+only on 2026-07-29; Up/Down was not restarted. The first 10-of-20 cycle proved
+all four assets were persisted but also showed that the fixed analysis cap
+selected only the low end of each ladder: nine signals were safely rejected for
+empty or stale books and only one BTC signal was complete. A read-only CLOB
+probe found executable books in the unselected half, so the Forward-only
+configuration now analyzes all 20 discovered markets every 15 minutes.
+
+The first 20-of-20 cycle, `shadow:c679c0c3-6143-4281-b43a-f068ca093046`,
+completed at `2026-07-28T18:13:21.779328+00:00` with no cycle reasons. Its
+`analyzed`/`rejected` counts were BTC `3/2`, ETH `2/3`, SOL `1/4`, and XRP
+`3/2`, all for `2026-07-29T16:00:00+00:00`. Every signal linked eight raw
+payloads, the raw-before-signal violation count was zero, forbidden trading
+tables were absent, and the only paper entry was hypothetical. These four
+asset-date groups are prospective and do not count toward the checkpoint until
+valid settlement labels exist. The completed checkpoint therefore remains
+`1/20` groups, `1/7` dates, and one of four assets. The controlled configuration
+restart reset the 336-hour Forward bound to approximately
+`2026-08-12T02:12:41+08:00`.
 
 In parallel, keep the short-Up/Down evidence in its separate database. The
 authoritative-boundary correction is deployed without weakening replay

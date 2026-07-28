@@ -124,6 +124,8 @@ def test_forward_environment_is_daily_read_only_and_lower_cadence() -> None:
     )
     assert "SHADOW_CONTRACT_FAMILY=daily_threshold" in content
     assert "SHADOW_INTERVAL_SECONDS=900" in content
+    assert "SHADOW_DISCOVERY_LIMIT=20" in content
+    assert "SHADOW_ANALYSIS_LIMIT=20" in content
     assert "TRADING_DISABLED=true" in content
     assert "POLYMARKET_STREAM_USER_CHANNEL_ENABLED=false" in content
     assert "BINANCE_STREAM_PROXY_URL=\n" in content
