@@ -1,6 +1,6 @@
 # Project Status
 
-**Date:** 2026-07-27
+**Date:** 2026-07-29
 
 **Classification:** Research prototype
 
@@ -13,7 +13,8 @@ software path are implemented. The system can discover, analyze, label, replay,
 calibrate, and paper-monitor real public Polymarket markets, but it is not a
 trading bot and is not approved for live capital.
 
-Phase 2 empirical acceptance is still pending. The local five-hour smoke
+Phase 2 read-only research evidence closure is now mechanically accepted. The
+local five-hour smoke
 completed cleanly and produced a verified replay, but its 132 decision snapshots
 represent only five unique settlement labels and no later out-of-sample window.
 The current local development network requires an explicit outbound proxy for
@@ -21,11 +22,22 @@ Binance WebSocket access; the proxied stream produced valid BTCUSDT and ETHUSDT
 1m Close ticks. The separate direct-connect Hong Kong VPS deployment completed
 its formal bounded Phase 2 shadow window against a fresh evidence database on
 2026-07-27. Continuous coverage and reconnect evidence passed. Its immutable
-source contains 10 unique settlement labels. A separate v5 working copy is now
-collecting forward evidence. It currently has 31 raw labels but only 25
-replay-eligible labels with matching analyzed decisions, so it still has no
-sealed VPS replay or out-of-sample calibration. These are evidence gaps, not
-successes.
+source contains 10 unique settlement labels. A separate v5 working copy then
+continued collecting forward evidence. On 2026-07-28, its read-only
+`replay-plan` reached `3922` eligible items and `34/30` replay-eligible unique
+labels. A WAL-consistent independent snapshot was created, and the earliest 30
+labels were sealed into a `3359`-item frozen training replay that verified
+`3359/3359`. A later independent snapshot reproduced the exact frozen manifest,
+added five valid post-cutoff OOS labels, sealed a `3984`-item combined replay
+that verified `3984/3984`, and completed fixed-holdout calibration. The
+mechanical checker returned `ACCEPTED` with all nine gates passing.
+
+This is evidence acceptance, not a positive model result. All five OOS labels
+belong to one BTC ladder and one settlement timestamp, so they are highly
+correlated. Polymarket midpoint beat both the raw and calibrated probabilities
+on Brier score, log loss, and ECE; calibration made this small sample worse.
+The project remains a research prototype, live trading remains **NO-GO**, and
+Phase 3 trading work is not authorized.
 
 A separate read-only research expansion now supports the currently observed
 5-minute and 15-minute Polymarket Up/Down contract family for BTC, ETH, SOL,
@@ -258,8 +270,7 @@ exact raw inputs -> Binance settlement label -> immutable replay
 -> persistent paper ledger
 ```
 
-Empirical acceptance remains open and must not be replaced with synthetic test
-results:
+The acceptance criteria are:
 
 - Collect at least 30 unique chronologically prior settlement labels and a
   separate later out-of-sample evaluation window.
@@ -276,9 +287,12 @@ results:
   mutation exists, and that any configured private key remains Keychain-only
   and disconnected.
 
-Until all items are evidenced, Phase 2 is **implemented but not accepted**.
-An exit code `0` from the mechanical database checker still requires final
-project review and never authorizes live capital or Phase 3 trading work.
+All items are now evidenced on the independent accepted snapshot. The
+mechanical checker returned exit code `0`, and final project review accepts
+Phase 2 as a complete read-only research and evidence pipeline. The observed
+five-label OOS result does not show model improvement over Polymarket and is too
+correlated for a profitability claim. Phase 2 acceptance never authorizes live
+capital or Phase 3 trading work.
 
 ## Verification Evidence
 
@@ -567,6 +581,69 @@ project review and never authorizes live capital or Phase 3 trading work.
   Forward still had zero replay datasets, zero calibration runs, no forbidden
   trading tables, and a latest `complete_rest_fallback` cycle with 20
   discovered, 10 analyzed, and zero hypothetical paper entries.
+- On 2026-07-28, the exact read-only plan advanced to `3922` eligible items and
+  `34/30` eligible unique labels. SQLite `backup()` created the independent
+  training snapshot
+  `/opt/polymarket-crypto-threshold/backups/phase2-training-20260728/crypto-threshold-20260728T101754.978295Z.db`.
+  Before replay construction it had SHA-256
+  `3c9e98a2d5f5d966c971210dfcaae9a81d36739311b42f42f16e1f528aa521e7`,
+  `integrity_check=ok`, zero foreign-key violations, schema v5, and zero replay
+  or calibration rows. The frozen dataset
+  `replay:204eca70-c64a-4539-9bde-2f504f5f68af` selected the earliest 30
+  labels, sealed `3359` items, and produced manifest SHA-256
+  `da7b245a89cd1e03f2d25137f1aa86da791ecc4f0cf0fff4df0928cfa03a370e`.
+  Its exact cutoff is `2026-07-27T16:13:16.984047+00:00` at
+  `label:88dce179-e282-434a-9323-cdcbb08f8b30`, and offline verification
+  passed `3359/3359`. The post-build database SHA-256 is
+  `ff1d594d2608daf42655bd4bd258f5dd0c6838479ee50930519ce5111de57b0c`;
+  a second integrity check passed with zero foreign-key violations.
+- The four non-training labels in that snapshot have selected decision times
+  between `2026-07-26T23:23:32Z` and `2026-07-27T15:42:48Z`, all before the
+  frozen cutoff, so the exact fixed-holdout audit reports
+  `valid_oos_labels=0`. No combined replay or calibration run was created.
+  The actively collected source database remained at zero replay datasets,
+  replay items, and calibration runs. It already contains 37 analyzed
+  post-cutoff decisions across three Daily markets with deadline
+  `2026-07-28T16:00:00Z`; these may become the first valid OOS labels only
+  after authoritative settlement. At the final observation the forward unit
+  was `active/running`, PID `152184`, with zero restarts and a latest
+  `complete_rest_fallback` cycle.
+- On 2026-07-29, five new labels passed the strict OOS chronology check. A new
+  WAL-consistent snapshot was created at
+  `/opt/polymarket-crypto-threshold/backups/phase2-oos-20260729/crypto-threshold-20260728T173136.176463Z.db`.
+  Its pre-build SHA-256 was
+  `3d81adf371605c364d486dd33995a51ae58f1029cb72ab8f4cd776baa881b5e0`;
+  it began at schema v5 with `integrity_check=ok`, zero foreign-key violations,
+  and zero replay or calibration rows. Rebuilding the 30-label training replay
+  produced the exact original `3359` items, cutoff, selected labels, and
+  manifest SHA-256
+  `da7b245a89cd1e03f2d25137f1aa86da791ecc4f0cf0fff4df0928cfa03a370e`,
+  then verified `3359/3359`.
+- The bound combined dataset
+  `replay:d9adcb2c-fcec-49b2-b24b-7c793e4a5d39` sealed `3984` items across 39
+  labels with manifest SHA-256
+  `bb818edcf9b288687f08bcb22a93a852bd9ebe94ab3dfe3ea7512d032ed1c9ab`
+  and verified `3984/3984`. Fixed-holdout run
+  `calibration:dbc1dc3e-638d-4b2a-9688-b4531d4baf7a` used 30 frozen labels and
+  evaluated five OOS labels without refitting. The mechanical acceptance
+  command returned exit code `0` and all nine checks passed. The report
+  SHA-256 is
+  `c347dccdcb6a493046149d4b6f6bfd96e95108b25bd206e4d6fee5aaa1b8ca84`;
+  the final evidence DB SHA-256 is
+  `a2401aeae0a84e602ff52133864082477762ba3a021e13acd177fe9291300e8e`.
+  Final read-only inspection reported `integrity_check=ok`, zero foreign-key
+  violations, two replay datasets, `7343` replay items, one calibration run,
+  and no forbidden trading tables. The active source remained at zero replay
+  and calibration rows.
+- The five OOS labels are one BTC ladder at the same
+  `2026-07-28T16:00:00Z` settlement, with strikes from `$56,000` to `$64,000`;
+  four resolved Yes and one resolved No at a common Binance close of
+  `63926.66`. Lower is better for all reported metrics. Polymarket midpoint
+  scored Brier `0.00420955`, log loss `0.03303304`, and ECE `0.0307`; the raw
+  model scored `0.01123915`, `0.05491243`, and `0.0482096`; calibrated
+  probabilities scored `0.05138889`, `0.17267713`, and `0.13333333`.
+  Therefore this accepted evidence run does not show model improvement and
+  supplies no profitability or live-readiness evidence.
 - The Up/Down snapshot's reported `boundary_mismatch=83` means 83 repeated
   signal rows across nine unique settled markets, not 83 markets. The rows
   comprise 65 analyzed and 18 rejected decisions across BNB, DOGE, ETH, HYPE,
@@ -643,25 +720,26 @@ project review and never authorizes live capital or Phase 3 trading work.
 - Coinbase USD versus Binance USDT is only a sanity comparison, not the
   settlement source.
 - The local sealed replay covers five unique settlement labels; the immutable
-  VPS source has 10 labels and the forward working copy has 31 raw labels but
-  only 25 replay-eligible labels at the latest exact audit. Neither VPS
-  artifact yet has a sealed replay or valid out-of-sample calibration window.
+  bounded VPS source has 10 labels. The accepted forward snapshot has a frozen
+  30-label training replay and five valid OOS labels, but all five OOS labels
+  are strikes in one BTC ladder at one settlement timestamp. This is a valid
+  chronology gate and a weak statistical sample. The market baseline beat both
+  raw and calibrated probabilities, and calibration degraded every reported
+  metric.
 - API schemas and fee behavior can change; parser and adapter versions make
   resulting records auditable but do not remove schema-drift risk.
 
 ## Next Gate
 
-Keep the bounded forward collector running until the read-only
-`replay-plan --training-label-count 30` result is `READY`, not merely until the
-raw settlement-label count reaches 30. At that point create a WAL-consistent
-independent forward snapshot, freeze and record the 30-label training cutoff
-there, build and verify the training replay, and do not write a replay into the
-actively collected source database. Do not use later labels to refit that
-window. Continue collecting a separate later OOS decision batch, then rebuild
-the combined chronological replay and publish raw, calibrated, and
-market-baseline metrics. Repeating the five-hour local smoke or the completed
-continuous 72-hour run is unnecessary. Live order placement remains explicitly
-outside this phase and requires a separate design and approval.
+Phase 2 read-only research acceptance is complete. Do not start live Phase 3
+trading work from this result. The next research gate is model validity: keep
+the existing forward collector available for a larger, event-diverse OOS set
+across multiple settlement dates and both supported assets, predefine an
+independent-event minimum, and test any calibration challenger against the raw
+model and Polymarket baseline without refitting the accepted frozen window.
+Repeating the five-hour local smoke or the completed continuous 72-hour run is
+unnecessary. Live order placement remains explicitly outside the approved
+scope and requires a separate design, stronger evidence, and owner approval.
 
 In parallel, keep the short-Up/Down evidence in its separate database. The
 authoritative-boundary correction is deployed without weakening replay
