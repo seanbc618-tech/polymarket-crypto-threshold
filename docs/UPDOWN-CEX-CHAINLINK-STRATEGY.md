@@ -33,8 +33,9 @@ For a contract ending at `T`:
 6. The final Chainlink open, close, Gamma result, and any data received after
    the checkpoint are forbidden model inputs.
 7. Runtime analysis is allowed only inside the checkpoint's declared
-   non-overlapping decision band and until ten seconds before
-   settlement. A completed analysis at or after `T` is rejected.
+   non-overlapping decision band. The legacy T-60 path stops ten seconds
+   before settlement; the isolated R0 challenger path stops five seconds
+   before settlement. A completed analysis at or after `T` is rejected.
 
 The legacy T-60 reference is a late-window nowcast: for a 5-minute market it
 observes the first four closed one-minute candles and predicts the final
@@ -130,6 +131,16 @@ zero. The ledger held 12 hypothetical entries and three completed authoritative
 v4 labels. Two entries had settled and both lost, for aggregate hypothetical
 PnL of `-21.263620 USDC`. Empty executable books rejected safely. Forward
 remained on its original PID and was not restarted.
+
+The isolated R0 challenger is also active in schema v6. Commit `76d0ad0`
+(`76d0ad0671bc0d8db8c86eeeac5a1e8f0470c251`) was activated for
+`crypto-threshold-updown-shadow.service` at `2026-07-29T17:38:08Z`; Forward
+was not restarted. At `2026-07-29T17:48:37Z`, the challenger had 156
+observations across five target times and six assets, 780 latency replays, and
+the complete declared latency grid. T-30 had 6 captured observations overall;
+the post-fix slice had 3 captured and 15 fail-closed rejections, with no late
+or expired-checkpoint reasons. Ten rows had settled, but their paper PnL is
+hypothetical research evidence rather than verified trading profit.
 
 ## Open-source Research Used
 

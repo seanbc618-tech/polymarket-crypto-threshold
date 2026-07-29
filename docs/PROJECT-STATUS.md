@@ -869,9 +869,11 @@ boundary are recorded below.
 
 #### R0 — Challenger collection: T-180/T-120/T-60/T-30 + market baseline + latency replay
 
-**Status:** **IMPLEMENTED FOR SHADOW COLLECTION**
+**Status:** **IMPLEMENTED AND ACTIVE FOR SHADOW COLLECTION**
 
-Activation and settled evidence must still be verified on the VPS.
+The VPS activation and first post-fix collection have been verified. Settlement
+labels and event-diverse OOS evaluation remain prospective evidence; they do
+not authorize promotion or live capital.
 
 Collect the same short-Up/Down markets at four pre-declared decision
 checkpoints. At every checkpoint, persist:
@@ -902,6 +904,27 @@ paper ledger; all four counterfactuals stay in the challenger namespace.
 Authoritative labels later settle challenger rows through the exact
 market/target/family join. Implementation and green tests do not count as
 forward evidence; the first complete VPS checkpoint grid is still required.
+
+The late-window guard is challenger-specific: R0 keeps a five-second minimum
+remaining-time boundary so a delayed discovery cycle can still attempt T-30,
+while the legacy T-60 paper path retains its ten-second boundary. Commit
+`76d0ad0` was deployed on 2026-07-29 at `17:38:08Z` by updating only
+`crypto-threshold-updown-shadow.service`; Forward stayed on PID `180886`.
+The deployed marker is the full commit
+`76d0ad0671bc0d8db8c86eeeac5a1e8f0470c251`, and `TRADING_DISABLED=true`
+remains effective.
+
+At the read-only snapshot on 2026-07-29 `17:48:37Z`, Up/Down was active as PID
+`207859` with zero restarts, and the database was schema v6 with 156
+observations across five target times and six assets. It contained 780 latency
+replays on the declared `0/100/250/500/1000 ms` grid. The checkpoint totals
+were T-180 `40/42` captured/observed, T-120 `35/42`, T-60 `14/36`, and T-30
+`6/36`; fail-closed rejections were primarily empty or incomplete public books.
+Among rows received after the fix, T-30 had `3 captured / 15 rejected`, with
+zero `cex_direction_checkpoint_too_late` and zero
+`cex_direction_checkpoint_expired` reasons. Ten replay rows had settled from
+exact labels; their `161.156704 USDC` value is hypothetical paper-ledger
+accounting only and is not a profitability claim.
 
 #### R1 — HFTBacktest-inspired microstructure and execution replay
 
