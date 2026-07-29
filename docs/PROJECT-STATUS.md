@@ -1,6 +1,6 @@
 # Project Status
 
-**Date:** 2026-07-29
+**Date:** 2026-07-30
 
 **Classification:** Research prototype
 
@@ -856,6 +856,111 @@ BTC, ETH, SOL, and XRP all represented and at least four groups per asset.
 Multiple strikes in one ladder count as one event group. The accepted five-label
 BTC ladder therefore starts this checkpoint at `1/20` groups, `1/7` dates, and
 one of four assets.
+
+### Approved Strategy Research Roadmap (2026-07-30)
+
+The owner approved the following research sequence. This roadmap is
+additive to the sealed v4 artifact: it does not authorize refitting v4, live
+BUY/SELL, signing, authenticated reconciliation, or a merge of Daily and
+short-Up/Down evidence. New challenger data must use a separate database or
+an explicitly versioned, family-scoped evidence namespace. Recording this
+roadmap does not implement any of its work packages.
+
+#### R0 — Challenger collection: T-180/T-120/T-60/T-30 + market baseline + latency replay
+
+**Status:** **APPROVED — next implementation priority; not implemented**
+
+Collect the same short-Up/Down markets at four pre-declared decision
+checkpoints. At every checkpoint, persist:
+
+- the sealed v4 probability as a frozen reference;
+- a market baseline from Polymarket midpoint and executable target-size ask
+  VWAP;
+- the current fee schedule, spread, depth, and slippage;
+- a fixed latency-sensitivity replay (zero-delay reference plus conservative
+  100 ms, 250 ms, 500 ms, and 1 s scenarios);
+- the authoritative settlement label when it later becomes available.
+
+R0 is a challenger-collection and measurement task, not a v4 promotion.
+Its minimum report must separate Brier/log loss/ECE, market-baseline error,
+fee-adjusted net EV, assumed fill rate, and paper drawdown/capital lock. A
+directional accuracy improvement without a positive executable edge does not
+pass.
+
+#### R1 — HFTBacktest-inspired microstructure and execution replay
+
+**Status:** **PLANNED — depends on R0 data**
+
+Use the HFTBacktest design as the reference for tick-by-tick replay, feed and
+order latency, order-book depth, queue position, and fill-model sensitivity.
+R0's latency grid is only a coarse snapshot sensitivity check; R1 is the
+full-tick/L2 replay and queue-model hardening step. The first implementation
+should remain a small local/research component rather than importing a
+production trading engine. Candidate CEX inputs are L2 imbalance,
+micro-price/VAMP, aggressive trade imbalance, spot-perpetual basis, and
+cross-venue lead/lag.
+
+R1 passes only when the replay is conservative across more than one fill and
+latency assumption and does not depend on an optimistic queue model. It must
+also explain which part of any profit comes from prediction, spread capture,
+rebates, or residual directional inventory.
+
+#### R2 — Freqtrade-inspired research-integrity gates
+
+**Status:** **PLANNED — required before factor promotion**
+
+Add explicit automated checks for look-ahead bias, recursive/rolling-feature
+contamination, timestamp gaps, future payloads, and accidental reuse of
+holdout outcomes. Add grouped chronological validation with a purge/embargo
+window for overlapping 5-minute and 15-minute events. Keep dry-run/paper
+behavior mechanically separate from any authenticated execution surface.
+
+R2 passes only with zero detected future-input violations and a reproducible
+sealed manifest. A green unit-test run alone is not an R2 pass.
+
+#### R3 — VectorBT-inspired offline factor screening
+
+**Status:** **PLANNED — after R1 and R2**
+
+Use fast offline sweeps to test narrowly defined factor families and
+checkpoint/threshold combinations. Each experiment must declare its search
+space before looking at its OOS result, retain losing trials, and compare
+against the market baseline and the frozen v4 reference. Automated feature
+generation is a discovery aid, never an automatic production promotion path.
+
+R3 passes only when a factor family shows positive fee/slippage-adjusted
+out-of-sample edge across independent dates, assets, and regimes, with
+stability under the R1 latency/fill replay.
+
+#### R4 — NautilusTrader-inspired execution-layer spike
+
+**Status:** **PLANNED — last, only after positive executable evidence**
+
+Study and, if justified, prototype an isolated adapter boundary using
+NautilusTrader's deterministic event model and its documented Polymarket order
+semantics. The spike must cover FAK/FOK/GTC/GTD behavior, quote-versus-token
+quantity, ambiguous submit outcomes, cancellation, and reconciliation. It
+must be pinned to a reviewed stable revision; a fast-moving development or
+release-candidate dependency is not production approval.
+
+R4 is an execution-engineering milestone, not a strategy-evidence shortcut.
+It remains read-only/no-secret until a separate live-capital authorization
+specifies capital, per-trade size, daily loss limit, and kill conditions.
+
+The implementation order is therefore:
+
+```text
+R0 challenger measurements
+  -> R2 integrity gates
+  -> R1 microstructure/execution replay hardening
+  -> R3 factor screening
+  -> R4 isolated execution-layer spike
+```
+
+R1 may begin collecting raw CEX microstructure data in parallel with R0, but
+no factor or execution result may be promoted until R2 has passed. The sealed
+v4 artifact, the current VPS services, and their no-trading boundaries remain
+unchanged throughout this roadmap.
 
 Commit `52bc4df` replaced relevance-only Daily discovery with an explicit
 America/New_York settlement-date query and round-robin BTC/ETH/SOL/XRP

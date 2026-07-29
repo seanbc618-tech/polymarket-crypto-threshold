@@ -123,6 +123,12 @@ indicator formulas and these structural lessons:
 Repository profit claims are not treated as evidence. Only this project's
 sealed holdout and later VPS forward outcomes count.
 
+The approved follow-up research and execution roadmap is maintained in the
+single authoritative status document:
+[PROJECT-STATUS.md](PROJECT-STATUS.md#approved-strategy-research-roadmap-2026-07-30).
+This strategy note describes the current v4 baseline; it is not a second
+source of roadmap status.
+
 ## Promotion Gate
 
 Deployment to VPS shadow is authorized. Real BUY/SELL remains disabled until a
