@@ -36,6 +36,11 @@ from crypto_threshold.domain.rules import (
     parse_contract,
 )
 from crypto_threshold.services.calibration_service import CalibrationService
+from crypto_threshold.services.cex_direction_service import (
+    CEX_DIRECTION_SUPPORTED_ASSETS,
+    CexDirectionArtifact,
+    CexDirectionTrainingService,
+)
 from crypto_threshold.services.discovery_service import DiscoveryService
 from crypto_threshold.services.market_workflow_service import MarketWorkflowService
 from crypto_threshold.services.paper_ledger_service import PaperLedgerService
@@ -175,26 +180,35 @@ def doctor(
             ),
         )
     )
-    checks.append(
-        (
-            "shadow_reference_contract",
+    if settings.SHADOW_CONTRACT_FAMILY == DAILY_THRESHOLD_FAMILY:
+        checks.append(
             (
-                settings.SHADOW_CONTRACT_FAMILY == DAILY_THRESHOLD_FAMILY
-                or settings.CHAINLINK_REFERENCE_STREAM_ENABLED
+                "shadow_reference_contract",
+                True,
+                "daily Binance REST/stream reference",
             )
-            and (
-                not settings.CHAINLINK_REFERENCE_STREAM_ENABLED
-                or settings.SHADOW_ENABLED
-            ),
-            (
-                "daily Binance REST/stream reference"
-                if settings.SHADOW_CONTRACT_FAMILY == DAILY_THRESHOLD_FAMILY
-                else "short Up/Down Chainlink public stream"
-                if settings.CHAINLINK_REFERENCE_STREAM_ENABLED
-                else "short Up/Down requires Chainlink public stream"
-            ),
         )
-    )
+    else:
+        try:
+            artifact = CexDirectionArtifact.load(settings.SHORT_CEX_MODEL_PATH)
+            checks.append(
+                (
+                    "short_cex_model",
+                    True,
+                    (
+                        f"{artifact.runtime_model_version} "
+                        f"checkpoint=T-{artifact.decision_lead_seconds}s"
+                    ),
+                )
+            )
+        except Exception as exc:
+            checks.append(
+                (
+                    "short_cex_model",
+                    False,
+                    f"{type(exc).__name__}: {exc}",
+                )
+            )
     for name, value in (
         ("gamma_url", settings.POLYMARKET_GAMMA_API_BASE),
         ("clob_url", settings.POLYMARKET_CLOB_API_BASE),
@@ -316,6 +330,29 @@ def doctor(
         except Exception as exc:
             checks.append(("clob_read", False, f"{type(exc).__name__}: {exc}"))
         if settings.SHADOW_CONTRACT_FAMILY == SHORT_UPDOWN_FAMILY:
+            try:
+                for asset in CEX_DIRECTION_SUPPORTED_ASSETS:
+                    series = binance.get_klines(asset, interval="1m", limit=2)
+                    snapshot = binance.latest_close_snapshot(series)
+                    checks.append(
+                        (
+                            f"short_cex_kline_{asset}",
+                            snapshot.price > 0,
+                            f"{snapshot.symbol}={snapshot.price}",
+                        )
+                    )
+            except Exception as exc:
+                checks.append(
+                    (
+                        "short_cex_kline_reads",
+                        False,
+                        f"{type(exc).__name__}: {exc}",
+                    )
+                )
+        if (
+            settings.SHADOW_CONTRACT_FAMILY == SHORT_UPDOWN_FAMILY
+            and settings.CHAINLINK_REFERENCE_STREAM_ENABLED
+        ):
             stream = ChainlinkReferencePriceStream(
                 stale_seconds=settings.CHAINLINK_REFERENCE_STREAM_STALE_SECONDS,
                 history_seconds=settings.CHAINLINK_REFERENCE_STREAM_HISTORY_SECONDS,
@@ -354,7 +391,7 @@ def doctor(
                 )
             finally:
                 stream.stop()
-        else:
+        if settings.SHADOW_CONTRACT_FAMILY == DAILY_THRESHOLD_FAMILY:
             try:
                 for asset in sorted(DAILY_THRESHOLD_ASSETS):
                     primary = binance.get_ticker_price(asset)
@@ -737,7 +774,7 @@ def calibrate(
 def paper_settle(
     limit: int = typer.Option(1000, min=1, max=5000),
 ) -> None:
-    """Settle open paper entries from persisted Binance labels only."""
+    """Settle open paper entries from persisted authoritative labels only."""
     settings = get_settings()
     database = Database(settings.DATABASE_PATH)
     database.initialize()
@@ -745,6 +782,72 @@ def paper_settle(
         Repository(database), min_net_ev=settings.PAPER_MIN_NET_EV
     ).settle_open(limit=limit)
     console.print(f"Settled {count} paper ledger entries; no exchange mutation executed")
+
+
+@app.command("train-short-cex")
+def train_short_cex(
+    db: Path | None = typer.Option(
+        None,
+        "--db",
+        help="Existing Up/Down evidence DB; defaults to DATABASE_PATH",
+    ),
+    output: Path | None = typer.Option(
+        None,
+        "--output",
+        help="Atomic output path; defaults to SHORT_CEX_MODEL_PATH",
+    ),
+    decision_lead_seconds: int = typer.Option(
+        60,
+        "--decision-lead-seconds",
+        min=30,
+        max=300,
+    ),
+    min_samples: int = typer.Option(500, "--min-samples", min=100),
+) -> None:
+    """Train a sealed CEX-kline model on Chainlink labels with a time holdout."""
+    settings = get_settings()
+    database_path = db if db is not None else Path(settings.DATABASE_PATH)
+    output_path = (
+        output if output is not None else Path(settings.SHORT_CEX_MODEL_PATH)
+    )
+    database = Database(database_path, read_only=True)
+    binance = BinanceProvider(settings.BINANCE_API_BASE)
+    try:
+        result = CexDirectionTrainingService(
+            Repository(database),
+            binance,
+        ).train(
+            output_path,
+            decision_lead_seconds=decision_lead_seconds,
+            min_samples=min_samples,
+        )
+    except Exception as exc:
+        console.print(
+            f"[red]Short CEX model training failed:[/] {type(exc).__name__}: {exc}"
+        )
+        raise typer.Exit(code=2) from exc
+    finally:
+        binance.close()
+    console.print(
+        f"[green]SEALED[/] {result.artifact.runtime_model_version} "
+        f"samples={result.sample_count} train={result.training_count} "
+        f"holdout={result.holdout_count}"
+    )
+    console.print(
+        "  holdout: "
+        f"Brier={result.holdout_brier:.6f} "
+        f"log_loss={result.holdout_log_loss:.6f} "
+        f"accuracy={result.holdout_accuracy:.4%}"
+    )
+    console.print(
+        "  constant baseline: "
+        f"Brier={result.baseline_brier:.6f} "
+        f"log_loss={result.baseline_log_loss:.6f} "
+        f"accuracy={result.baseline_accuracy:.4%}"
+    )
+    console.print(
+        f"  artifact={result.output_path} hash={result.artifact.artifact_hash}"
+    )
 
 
 @app.command("phase2-acceptance")
@@ -799,14 +902,15 @@ def shadow(
     ):
         console.print("[red]Unsafe shadow configuration; refusing to start.[/]")
         raise typer.Exit(code=2)
-    if (
-        settings.SHADOW_CONTRACT_FAMILY == SHORT_UPDOWN_FAMILY
-        and not settings.CHAINLINK_REFERENCE_STREAM_ENABLED
-    ):
-        console.print(
-            "[red]short_updown shadow requires the public Chainlink stream.[/]"
-        )
-        raise typer.Exit(code=2)
+    if settings.SHADOW_CONTRACT_FAMILY == SHORT_UPDOWN_FAMILY:
+        try:
+            CexDirectionArtifact.load(settings.SHORT_CEX_MODEL_PATH)
+        except Exception as exc:
+            console.print(
+                "[red]short_updown shadow requires a valid sealed CEX model:[/] "
+                f"{type(exc).__name__}: {exc}"
+            )
+            raise typer.Exit(code=2) from exc
     database = Database(settings.DATABASE_PATH)
     database.initialize()
     repository = Repository(database)
@@ -864,7 +968,6 @@ def shadow(
         coinbase=coinbase,
         settings=settings,
         stream_coordinator=stream_coordinator,
-        chainlink_stream=chainlink_stream,
     )
     monitor = ShadowMonitorService(
         repository=repository,
@@ -884,6 +987,7 @@ def shadow(
         contract_family=settings.SHADOW_CONTRACT_FAMILY,
         discovery_limit=settings.SHADOW_DISCOVERY_LIMIT,
         analysis_limit=settings.SHADOW_ANALYSIS_LIMIT,
+        settlement_limit=settings.SHADOW_SETTLEMENT_LIMIT,
     )
     deadline = (
         time.monotonic() + duration_hours * 3600

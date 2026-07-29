@@ -220,3 +220,115 @@ def test_payload_schema_drift_degrades_cycle_without_exchange_mutation(
         for reason in cycle.reasons
     )
     assert not hasattr(workflow, "place_order")
+
+
+def test_daily_cycle_oversamples_and_replaces_unsupported_candidates(
+    tmp_path: Path,
+) -> None:
+    database = Database(tmp_path / "daily-fill.db")
+    database.initialize()
+    repository = Repository(database)
+    assets = ("BTC", "ETH", "SOL", "XRP")
+    results = []
+    for index in range(28):
+        asset = assets[index % len(assets)]
+        unsupported = asset == "SOL" and index in {2, 6}
+        results.append(
+            SimpleNamespace(
+                market=SimpleNamespace(market_id=f"market-{index:02d}"),
+                rule=SimpleNamespace(
+                    tradable=not unsupported,
+                    asset=asset,
+                ),
+            )
+        )
+
+    class Discovery:
+        def __init__(self) -> None:
+            self.limits: list[int] = []
+
+        def discover(self, *, limit: int) -> list[object]:
+            self.limits.append(limit)
+            return results[:limit]
+
+    class Workflow:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def analyze(self, market_id: str) -> object:
+            self.calls.append(market_id)
+            return SimpleNamespace()
+
+    class Paper:
+        def record(self, signal: object) -> tuple[object, bool]:
+            return SimpleNamespace(action="skip"), True
+
+        def settle_open(self) -> int:
+            return 0
+
+    discovery = Discovery()
+    workflow = Workflow()
+    cycle = ShadowMonitorService(
+        repository=repository,
+        discovery=discovery,  # type: ignore[arg-type]
+        workflow=workflow,  # type: ignore[arg-type]
+        paper=Paper(),  # type: ignore[arg-type]
+        discovery_limit=20,
+        analysis_limit=20,
+        clock=lambda: NOW,
+    ).run_once()
+
+    selected_assets = [
+        results[int(market_id.rsplit("-", 1)[1])].rule.asset
+        for market_id in workflow.calls
+    ]
+    assert discovery.limits == [40]
+    assert cycle.discovered_count == 20
+    assert cycle.analyzed_count == 20
+    assert len(workflow.calls) == 20
+    assert "market-02" not in workflow.calls
+    assert "market-06" not in workflow.calls
+    assert {asset: selected_assets.count(asset) for asset in assets} == {
+        "BTC": 5,
+        "ETH": 5,
+        "SOL": 5,
+        "XRP": 5,
+    }
+
+
+def test_settlement_budget_is_independent_from_analysis_budget(
+    tmp_path: Path,
+) -> None:
+    database = Database(tmp_path / "settlement-budget.db")
+    database.initialize()
+    repository = Repository(database)
+
+    class Discovery:
+        def discover(self, *, limit: int) -> list[object]:
+            return []
+
+    class Paper:
+        def settle_open(self) -> int:
+            return 0
+
+    class Settlement:
+        def __init__(self) -> None:
+            self.limits: list[int] = []
+
+        def settle_due(self, *, limit: int) -> tuple[()]:
+            self.limits.append(limit)
+            return ()
+
+    settlement = Settlement()
+    ShadowMonitorService(
+        repository=repository,
+        discovery=Discovery(),  # type: ignore[arg-type]
+        workflow=object(),  # type: ignore[arg-type]
+        paper=Paper(),  # type: ignore[arg-type]
+        settlement=settlement,  # type: ignore[arg-type]
+        analysis_limit=7,
+        settlement_limit=50,
+        clock=lambda: NOW,
+    ).run_once()
+
+    assert settlement.limits == [50]

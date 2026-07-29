@@ -69,6 +69,8 @@ ASSET_CONTRACTS: dict[str, AssetContract] = {
         aliases=("dogecoin", "doge"),
         chainlink_pair="DOGE/USD",
         short_updown=True,
+        binance_pair="DOGE/USDT",
+        binance_symbol="DOGEUSDT",
     ),
     "BNB": AssetContract(
         symbol="BNB",
@@ -76,6 +78,8 @@ ASSET_CONTRACTS: dict[str, AssetContract] = {
         aliases=("bnb", "binance coin"),
         chainlink_pair="BNB/USD",
         short_updown=True,
+        binance_pair="BNB/USDT",
+        binance_symbol="BNBUSDT",
     ),
     "HYPE": AssetContract(
         symbol="HYPE",
@@ -97,7 +101,7 @@ SUPPORTED_ASSETS = DAILY_THRESHOLD_ASSETS
 SUPPORTED_BINANCE_SYMBOLS = frozenset(
     contract.binance_symbol
     for contract in ASSET_CONTRACTS.values()
-    if contract.daily_threshold and contract.binance_symbol is not None
+    if contract.binance_symbol is not None
 )
 SUPPORTED_CHAINLINK_PAIRS = frozenset(
     contract.chainlink_pair

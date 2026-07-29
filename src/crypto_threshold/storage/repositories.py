@@ -14,7 +14,10 @@ from uuid import uuid4
 from crypto_threshold.domain.fees import MarketFeeSchedule
 from crypto_threshold.domain.markets import CryptoMarket, OrderBookSnapshot
 from crypto_threshold.domain.prices import PriceCrossCheck, PriceSnapshot
-from crypto_threshold.domain.probability import AnalysisSignal
+from crypto_threshold.domain.probability import (
+    SHORT_UPDOWN_WORKFLOW_SOURCE_VERSION,
+    AnalysisSignal,
+)
 from crypto_threshold.domain.research import (
     PaperLedgerEntry,
     SettlementLabel,
@@ -707,11 +710,15 @@ class Repository:
                                   AND s.asset = r.asset
                                   AND s.contract_family = r.contract_family
                                   AND (
+                                      r.contract_family != 'short_updown'
+                                      OR s.source_version = ?
+                                  )
+                                  AND (
                                       (r.contract_family = 'daily_threshold'
                                        AND s.threshold = r.strike)
                                       OR
                                       (r.contract_family = 'short_updown'
-                                       AND CAST(s.threshold AS REAL) > 0)
+                                       AND s.estimated_probability IS NOT NULL)
                                   )
                                   AND s.deadline = r.target_time_utc
                             ) THEN 1 ELSE 0 END AS had_analyzed_predeadline_signal,
@@ -726,7 +733,10 @@ class Repository:
                         LEFT JOIN settlement_attempts AS a
                           ON a.market_id = m.market_id
                         WHERE (
-                            r.tradable = 1
+                            (
+                                r.contract_family = 'daily_threshold'
+                                AND r.tradable = 1
+                            )
                             OR EXISTS (
                                 SELECT 1
                                 FROM analysis_signals AS s
@@ -736,11 +746,15 @@ class Repository:
                                   AND s.asset = r.asset
                                   AND s.contract_family = r.contract_family
                                   AND (
+                                      r.contract_family != 'short_updown'
+                                      OR s.source_version = ?
+                                  )
+                                  AND (
                                       (r.contract_family = 'daily_threshold'
                                        AND s.threshold = r.strike)
                                       OR
                                       (r.contract_family = 'short_updown'
-                                       AND CAST(s.threshold AS REAL) > 0)
+                                       AND s.estimated_probability IS NOT NULL)
                                   )
                                   AND s.deadline = r.target_time_utc
                             )
@@ -770,7 +784,13 @@ class Repository:
                     ORDER BY candidate_rank, candidate_group, target_time_utc, market_id
                     LIMIT ?
                     """,
-                    (_iso(ready_before), _iso(ready_before), limit),
+                    (
+                        SHORT_UPDOWN_WORKFLOW_SOURCE_VERSION,
+                        SHORT_UPDOWN_WORKFLOW_SOURCE_VERSION,
+                        _iso(ready_before),
+                        _iso(ready_before),
+                        limit,
+                    ),
                 )
             )
 
@@ -783,6 +803,40 @@ class Repository:
                 """,
                 (market_id,),
             ).fetchone()
+
+    def cex_direction_training_rows(self, *, assets: tuple[str, ...]) -> list[Row]:
+        """Return authoritative short labels without requiring historical signals."""
+        if not assets:
+            return []
+        placeholders = ",".join("?" for _ in assets)
+        with closing(self.database.connect()) as connection:
+            return list(
+                connection.execute(
+                    f"""
+                    SELECT
+                        l.label_id,
+                        l.market_id,
+                        l.target_time_utc,
+                        l.outcome_yes,
+                        l.received_at AS label_received_at,
+                        l.source_version AS label_source_version,
+                        r.asset,
+                        r.candle_interval,
+                        r.window_start_time_utc
+                    FROM settlement_labels AS l
+                    JOIN resolution_rules AS r ON r.market_id = l.market_id
+                    WHERE l.contract_family = 'short_updown'
+                      AND l.provider = 'chainlink'
+                      AND r.contract_family = 'short_updown'
+                      AND r.asset IN ({placeholders})
+                      AND r.candle_interval IN ('5m', '15m')
+                      AND r.window_start_time_utc IS NOT NULL
+                      AND l.target_time_utc = r.target_time_utc
+                    ORDER BY l.target_time_utc, r.asset, r.candle_interval, l.market_id
+                    """,
+                    assets,
+                )
+            )
 
     def replay_candidate_rows(self, *, contract_family: str) -> list[Row]:
         """Return labeled analyzed signals in decision-time order."""
@@ -801,12 +855,16 @@ class Repository:
                      AND l.contract_family = s.contract_family
                     WHERE s.status = 'analyzed'
                       AND s.contract_family = ?
+                      AND (
+                          s.contract_family != 'short_updown'
+                          OR s.source_version = ?
+                      )
                       AND s.estimated_probability IS NOT NULL
                       AND s.yes_ask_vwap IS NOT NULL
                       AND s.no_ask_vwap IS NOT NULL
                     ORDER BY s.observed_at, s.signal_id
                     """,
-                    (contract_family,),
+                    (contract_family, SHORT_UPDOWN_WORKFLOW_SOURCE_VERSION),
                 )
             )
 

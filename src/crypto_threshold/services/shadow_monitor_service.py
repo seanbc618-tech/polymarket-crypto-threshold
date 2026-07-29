@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import defaultdict, deque
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
@@ -55,6 +56,7 @@ class ShadowMonitorService:
         contract_family: str = DAILY_THRESHOLD_FAMILY,
         discovery_limit: int = 20,
         analysis_limit: int = 10,
+        settlement_limit: int | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self.repository = repository
@@ -71,6 +73,15 @@ class ShadowMonitorService:
         self.contract_family = contract_family
         self.discovery_limit = discovery_limit
         self.analysis_limit = analysis_limit
+        self.settlement_limit = (
+            analysis_limit if settlement_limit is None else settlement_limit
+        )
+        if self.discovery_limit <= 0:
+            raise ValueError("discovery_limit must be positive")
+        if self.analysis_limit <= 0:
+            raise ValueError("analysis_limit must be positive")
+        if self.settlement_limit <= 0:
+            raise ValueError("settlement_limit must be positive")
         self.clock = clock or (lambda: datetime.now(UTC))
 
     def start(self) -> None:
@@ -100,11 +111,18 @@ class ShadowMonitorService:
         stream_health: dict[str, Any] = {}
         payload_boundary = self.schema_monitor.capture_boundary()
         try:
-            results = (
-                self.discovery.discover_updown(limit=self.discovery_limit)
-                if self.contract_family == SHORT_UPDOWN_FAMILY
-                else self.discovery.discover(limit=self.discovery_limit)
-            )
+            if self.contract_family == SHORT_UPDOWN_FAMILY:
+                results = self.discovery.discover_updown(
+                    limit=self.discovery_limit
+                )
+            else:
+                candidates = self.discovery.discover(
+                    limit=min(500, self.discovery_limit * 2)
+                )
+                results = _tradable_round_robin(
+                    candidates,
+                    limit=self.discovery_limit,
+                )
             discovered = len(results)
             eligible = {
                 result.market.market_id: result
@@ -170,7 +188,23 @@ class ShadowMonitorService:
             else:
                 stream_health["chainlink_reference"] = {"status": "disabled"}
 
-            if rest_fallback:
+            if self.contract_family == SHORT_UPDOWN_FAMILY:
+                due_market_ids = {
+                    market_id
+                    for market_id, result in eligible.items()
+                    if self.workflow.short_signal_due(result.rule, at=started_at)
+                }
+                target_market_ids = [
+                    market_id
+                    for market_id in target_market_ids
+                    if market_id in due_market_ids
+                ]
+                target_market_ids.extend(
+                    market_id
+                    for market_id in eligible
+                    if market_id in due_market_ids
+                )
+            elif rest_fallback:
                 target_market_ids.extend(eligible)
             target_market_ids = list(dict.fromkeys(target_market_ids))
             for market_id in target_market_ids:
@@ -195,7 +229,7 @@ class ShadowMonitorService:
                     skipped += 1
             if self.settlement is not None:
                 try:
-                    self.settlement.settle_due(limit=self.analysis_limit)
+                    self.settlement.settle_due(limit=self.settlement_limit)
                 except SettlementBatchError as exc:
                     reasons.extend(
                         f"settlement_error:{reason}" for reason in exc.reasons
@@ -274,3 +308,29 @@ def _tick_evidence(
         }
         for tick in ticks
     ]
+
+
+def _tradable_round_robin(
+    results: list[Any],
+    *,
+    limit: int,
+) -> list[Any]:
+    """Fill the Daily budget with supported rules while preserving asset balance."""
+    buckets: dict[str, deque[Any]] = defaultdict(deque)
+    for result in results:
+        if result.rule.tradable:
+            buckets[str(result.rule.asset)].append(result)
+    selected: list[Any] = []
+    assets = sorted(buckets)
+    while len(selected) < limit:
+        added = False
+        for asset in assets:
+            if not buckets[asset]:
+                continue
+            selected.append(buckets[asset].popleft())
+            added = True
+            if len(selected) >= limit:
+                break
+        if not added:
+            break
+    return selected

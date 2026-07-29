@@ -30,9 +30,13 @@ def test_stream_defaults_to_disabled_read_only_shadow() -> None:
     assert settings.POLYMARKET_STREAM_REST_VERIFY_SECONDS == 90
     assert settings.SHADOW_ENABLED is False
     assert settings.SHADOW_CONTRACT_FAMILY == "daily_threshold"
+    assert settings.SHADOW_SETTLEMENT_LIMIT == 10
     assert settings.BINANCE_REFERENCE_STREAM_ENABLED is False
     assert settings.CHAINLINK_REFERENCE_STREAM_ENABLED is False
     assert settings.CHAINLINK_VOLATILITY_SAMPLE_SECONDS == 30
+    assert settings.SHORT_CEX_MODEL_PATH == "data/models/cex-direction-v1.json"
+    assert settings.SHORT_CEX_MIN_REMAINING_SECONDS == 10
+    assert settings.SHORT_CEX_MAX_CHECKPOINT_LAG_SECONDS == 50
     assert settings.BINANCE_STREAM_PROXY_URL is None
     assert settings.PAPER_MIN_NET_EV == Decimal("0.02")
 

@@ -38,9 +38,8 @@ SHORT_REQUIRED_INPUT_ROLES = {
     "up_book",
     "down_book",
     "market_info_fee_schedule",
-    "authoritative_window_price",
-    "chainlink_current_price",
-    "chainlink_volatility_window",
+    "cex_direction_klines_1m",
+    "cex_direction_model",
 }
 # Compatibility export for the original daily-threshold replay tests.
 REQUIRED_INPUT_ROLES = DAILY_REQUIRED_INPUT_ROLES
@@ -412,8 +411,16 @@ class ReplayService:
         label_target = _time(signal["label_target_time_utc"])
         if deadline != label_target:
             return None, "settlement_target_mismatch"
-        if not _same_decimal(signal["threshold"], signal["label_strike"]):
+        if (
+            str(signal["contract_family"]) == DAILY_THRESHOLD_FAMILY
+            and not _same_decimal(signal["threshold"], signal["label_strike"])
+        ):
             return None, "settlement_threshold_mismatch"
+        if (
+            str(signal["contract_family"]) == SHORT_UPDOWN_FAMILY
+            and signal["threshold"] is not None
+        ):
+            return None, "unexpected_short_signal_threshold"
         if decision_at >= deadline:
             return None, "non_predeadline_signal"
         if label_available_at <= decision_at:
@@ -604,10 +611,16 @@ def _input_manifest_hash(rows: list[Any]) -> str:
 
 def _ev_matches(feature: dict[str, Any]) -> bool:
     probability = Decimal(str(feature["estimated_probability"]))
-    yes = probability - Decimal(str(feature["yes_ask_vwap"])) - Decimal(
+    if feature.get("contract_family") == SHORT_UPDOWN_FAMILY:
+        yes_probability = Decimal(str(feature["probability_low"]))
+        no_probability = Decimal("1") - Decimal(str(feature["probability_high"]))
+    else:
+        yes_probability = probability
+        no_probability = Decimal("1") - probability
+    yes = yes_probability - Decimal(str(feature["yes_ask_vwap"])) - Decimal(
         str(feature["yes_fee_per_share"])
     )
-    no = Decimal("1") - probability - Decimal(str(feature["no_ask_vwap"])) - Decimal(
+    no = no_probability - Decimal(str(feature["no_ask_vwap"])) - Decimal(
         str(feature["no_fee_per_share"])
     )
     tolerance = Decimal("0.000000000001")

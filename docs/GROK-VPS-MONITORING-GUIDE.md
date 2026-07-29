@@ -516,7 +516,11 @@ for label, path in DATABASES.items():
                 """
                 SELECT source_version, model_version, status, COUNT(*)
                 FROM analysis_signals
-                WHERE source_version = 'market-workflow-v2'
+                WHERE source_version IN (
+                    'market-workflow-v2',
+                    'market-workflow-v3',
+                    'market-workflow-v4'
+                )
                 GROUP BY source_version, model_version, status
                 ORDER BY model_version, status
                 """,
@@ -648,13 +652,18 @@ Additional interpretation:
 - The pre-fix v1 audit baseline is 83 mismatched signal rows across nine unique
   markets, with maximum relative difference `106.612262` ppm. Report it as
   historical evidence, not a current failure, and never relabel or delete it.
-  `post_fix_boundary_mismatch_signal_rows`,
-  `post_fix_boundary_mismatch_market_count`, and `outcome_mismatch` must all be
-  zero. A zero mismatch is not acceptance while
-  `post_fix_boundary_pair_market_count` is zero; report `PENDING` until at
-  least one v2 signal and v2 label share a market. Any post-fix mismatch is
-  FAIL for the separate short-Up/Down replay path. Do not weaken exact
-  comparison or merge this evidence into the Daily database.
+  The deployed v2 audit is also invalid: its current baseline is 28 mismatched
+  signal rows across seven unique markets because active-window provisional
+  `openPrice` values changed by completion. Report any non-zero
+  `post_fix_boundary_mismatch_signal_rows` and market count describe v2
+  historical invalidity even when `outcome_mismatch` is zero.
+  Workflow v4 intentionally has `threshold=NULL`: it predicts the authoritative
+  Chainlink outcome from closed CEX candles and therefore must not be compared
+  to the final Chainlink opening value as if that value were a model input.
+  For v4 require `model_name=cex_kline_chainlink_direction`, exact
+  `cex_direction_klines_1m` plus `cex_direction_model` input roles, a
+  pre-deadline decision, and the final Chainlink outcome label. Do not repair
+  v1/v2/v3 history or merge this evidence into the Daily database.
 - On schema v5, Up/Down must report `settlement_attempts` rather than
   `MISSING`. The due count includes only `pending` and `error` rows;
   succeeded rows are excluded because they should already have a label.
@@ -773,8 +782,9 @@ Use one overall verdict:
   evidence is still readable.
 - `FAIL`: A required service failed, active-service evidence is beyond the FAIL
   threshold, NTP is not synchronized, a DB is missing/unreadable, a forbidden
-  table exists, post-fix boundary/outcome mismatch is non-zero, or logs show an
-  unhandled exception.
+  table exists, a v4 outcome/input-contract mismatch is non-zero, or logs show
+  an unhandled exception. Historical v1/v2 boundary mismatches remain reported
+  evidence and do not by themselves make a healthy v4 process fail.
 - `UNKNOWN`: SSH or permissions prevented observation. Never convert UNKNOWN
   into PASS or FAIL by guessing.
 - `EXPECTED_COMPLETE`: The bounded Daily service ended successfully and its
@@ -859,8 +869,8 @@ Up/Down service
 - Resolution payload summary/cursor:
 - Read window and snapshot consistency:
 - Historical v1 boundary mismatch rows / markets / maximum ppm:
-- Post-fix v2 boundary pairs and mismatch rows / markets:
-- Post-fix signal versions / authoritative payload cursor:
+- Historical v2 boundary pairs and mismatch rows / markets:
+- v3/v4 signal versions / exact CEX input cursor:
 - Outcome mismatch:
 
 Backups

@@ -8,14 +8,14 @@ from decimal import Decimal
 
 import httpx
 
-from crypto_threshold.domain.assets import ASSET_CONTRACTS, DAILY_THRESHOLD_ASSETS
+from crypto_threshold.domain.assets import ASSET_CONTRACTS
 from crypto_threshold.domain.prices import Kline, KlineSeries, PriceSnapshot
 
 BINANCE_API = "https://api.binance.com/api/v3"
 BINANCE_SOURCE_VERSION = "binance-spot-rest-v3"
 ASSET_SYMBOLS = {
     asset: ASSET_CONTRACTS[asset].binance_symbol
-    for asset in DAILY_THRESHOLD_ASSETS
+    for asset in ASSET_CONTRACTS
     if ASSET_CONTRACTS[asset].binance_symbol is not None
 }
 

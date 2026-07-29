@@ -81,9 +81,12 @@ def test_updown_environment_is_separate_public_and_read_only() -> None:
 
     assert "DATABASE_PATH=/opt/polymarket-crypto-threshold/data/updown-shadow.db" in content
     assert "SHADOW_CONTRACT_FAMILY=short_updown" in content
-    assert "CHAINLINK_REFERENCE_STREAM_ENABLED=true" in content
+    assert "CHAINLINK_REFERENCE_STREAM_ENABLED=false" in content
     assert "BINANCE_REFERENCE_STREAM_ENABLED=false" in content
+    assert "SHORT_CEX_MODEL_PATH=/opt/polymarket-crypto-threshold/data/models/" in content
+    assert "SHADOW_INTERVAL_SECONDS=10" in content
     assert "SHADOW_ANALYSIS_LIMIT=14" in content
+    assert "SHADOW_SETTLEMENT_LIMIT=50" in content
     assert "TRADING_DISABLED=true" in content
     assert "POLYMARKET_STREAM_USER_CHANNEL_ENABLED=false" in content
     assert "POLYMARKET_PRIVATE_KEY" not in content
@@ -126,6 +129,7 @@ def test_forward_environment_is_daily_read_only_and_lower_cadence() -> None:
     assert "SHADOW_INTERVAL_SECONDS=900" in content
     assert "SHADOW_DISCOVERY_LIMIT=20" in content
     assert "SHADOW_ANALYSIS_LIMIT=20" in content
+    assert "SHADOW_SETTLEMENT_LIMIT=20" in content
     assert "TRADING_DISABLED=true" in content
     assert "POLYMARKET_STREAM_USER_CHANNEL_ENABLED=false" in content
     assert "BINANCE_STREAM_PROXY_URL=\n" in content

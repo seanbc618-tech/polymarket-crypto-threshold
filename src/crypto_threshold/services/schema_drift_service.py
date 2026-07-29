@@ -202,6 +202,32 @@ def _coinbase_spot(payload: Any) -> list[str]:
     return [f"missing_data_{key}" for key in missing]
 
 
+def _cex_direction_model(payload: Any) -> list[str]:
+    if not isinstance(payload, dict):
+        return ["root_not_object"]
+    issues: list[str] = []
+    for key in (
+        "schema_version",
+        "model_name",
+        "model_version",
+        "feature_version",
+        "feature_names",
+        "decision_lead_seconds",
+        "means",
+        "scales",
+        "weights",
+        "intercept",
+        "training",
+        "artifact_hash",
+    ):
+        if key not in payload:
+            issues.append(f"missing_{key}")
+    for key in ("feature_names", "means", "scales", "weights"):
+        if key in payload and not isinstance(payload[key], list):
+            issues.append(f"{key}_not_list")
+    return issues
+
+
 def _chainlink_tick(payload: Any) -> list[str]:
     if not isinstance(payload, dict):
         return ["root_not_object"]
@@ -320,6 +346,8 @@ _VALIDATORS: dict[tuple[str, str], Callable[[Any], list[str]]] = {
     ("binance", "settlement_klines_1m"): _binance_klines,
     ("binance", "volatility_klines_1d"): _binance_klines,
     ("binance", "settlement_candle_1m_close"): _binance_klines,
+    ("binance", "cex_direction_klines_1m"): _binance_klines,
+    ("local_model", "cex_direction_model"): _cex_direction_model,
     ("coinbase", "sanity_spot"): _coinbase_spot,
     ("chainlink", "chainlink_start_price"): _chainlink_tick,
     ("chainlink", "chainlink_current_price"): _chainlink_tick,

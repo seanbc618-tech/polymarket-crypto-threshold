@@ -6,12 +6,15 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
 
+DAILY_WORKFLOW_SOURCE_VERSION = "market-workflow-v2"
+SHORT_UPDOWN_WORKFLOW_SOURCE_VERSION = "market-workflow-v4"
+
 
 @dataclass(frozen=True)
 class ProbabilityEstimate:
     accepted: bool
     rejection_reason: str | None
-    threshold: Decimal
+    threshold: Decimal | None
     spot_price: Decimal
     time_to_deadline_hours: Decimal
     base_probability: Decimal | None

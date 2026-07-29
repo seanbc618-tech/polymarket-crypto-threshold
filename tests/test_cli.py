@@ -147,7 +147,7 @@ def test_shadow_rejects_private_key_from_process_environment(
     assert "test-secret" not in result.output
 
 
-def test_short_shadow_requires_public_chainlink_stream(
+def test_short_shadow_requires_sealed_cex_model(
     monkeypatch: object,
 ) -> None:
     monkeypatch.setenv("SHADOW_ENABLED", "true")
@@ -158,7 +158,7 @@ def test_short_shadow_requires_public_chainlink_stream(
     get_settings.cache_clear()
 
     assert result.exit_code == 2
-    assert "requires the public Chainlink stream" in result.output
+    assert "requires a valid sealed CEX model" in result.output
 
 
 def test_empty_replay_build_is_persisted_but_fails_acceptance(

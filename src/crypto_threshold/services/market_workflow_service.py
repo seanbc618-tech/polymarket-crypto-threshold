@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
@@ -17,19 +16,7 @@ from crypto_threshold.adapters.polymarket.translator import (
     translate_order_book,
 )
 from crypto_threshold.adapters.prices.binance import BinanceProvider
-from crypto_threshold.adapters.prices.chainlink_stream import (
-    ChainlinkReferencePriceStream,
-)
 from crypto_threshold.adapters.prices.coinbase import CoinbaseProvider
-from crypto_threshold.adapters.prices.polymarket_crypto import (
-    AUTHORITATIVE_WINDOW_PRICE_KIND,
-    POLYMARKET_CRYPTO_PRICE_SOURCE,
-    POLYMARKET_CRYPTO_PRICE_SOURCE_VERSION,
-    CryptoWindowPrice,
-    crypto_window_price_evidence,
-    parse_crypto_window_price,
-)
-from crypto_threshold.adapters.prices.stream import ReferencePriceTick
 from crypto_threshold.config import Settings
 from crypto_threshold.domain.fees import (
     FEE_SOURCE_VERSION,
@@ -43,16 +30,28 @@ from crypto_threshold.domain.markets import (
     calculate_ask_vwap,
 )
 from crypto_threshold.domain.prices import PriceCrossCheck, PriceSnapshot
-from crypto_threshold.domain.probability import AnalysisSignal, ProbabilityEstimate
+from crypto_threshold.domain.probability import (
+    DAILY_WORKFLOW_SOURCE_VERSION,
+    SHORT_UPDOWN_WORKFLOW_SOURCE_VERSION,
+    AnalysisSignal,
+    ProbabilityEstimate,
+)
 from crypto_threshold.domain.rules import (
     SHORT_UPDOWN_FAMILY,
     CryptoResolutionRule,
     parse_contract,
 )
+from crypto_threshold.services.cex_direction_service import (
+    CEX_DIRECTION_ARTIFACT_VERSION,
+    CEX_DIRECTION_FEATURE_NAMES,
+    CEX_DIRECTION_MODEL_NAME,
+    CEX_DIRECTION_SUPPORTED_ASSETS,
+    CexDirectionArtifact,
+    extract_cex_direction_features,
+)
 from crypto_threshold.services.pricing_service import cross_check_prices
 from crypto_threshold.services.probability_service import (
     annualized_realized_volatility,
-    annualized_tick_volatility,
     estimate_threshold_probability,
 )
 from crypto_threshold.services.stream_research_service import (
@@ -61,7 +60,7 @@ from crypto_threshold.services.stream_research_service import (
 )
 from crypto_threshold.storage.repositories import Repository
 
-WORKFLOW_VERSION = "market-workflow-v2"
+WORKFLOW_VERSION = DAILY_WORKFLOW_SOURCE_VERSION
 
 
 @dataclass
@@ -83,7 +82,6 @@ class MarketWorkflowService:
         settings: Settings,
         clock: Callable[[], datetime] | None = None,
         stream_coordinator: StreamResearchCoordinator | None = None,
-        chainlink_stream: ChainlinkReferencePriceStream | None = None,
     ) -> None:
         self.client = client
         self.repository = repository
@@ -92,10 +90,7 @@ class MarketWorkflowService:
         self.settings = settings
         self.clock = clock or (lambda: datetime.now(UTC))
         self.stream_coordinator = stream_coordinator
-        self.chainlink_stream = chainlink_stream
-        self._window_price_cache: OrderedDict[
-            tuple[str, str, datetime, datetime], CryptoWindowPrice
-        ] = OrderedDict()
+        self._cex_direction_artifact: CexDirectionArtifact | None = None
 
     def analyze(
         self, market_id: str, *, target_size_usdc: Decimal | None = None
@@ -162,6 +157,8 @@ class MarketWorkflowService:
                 # The optional stream may never block the authoritative REST path.
                 pass
         reasons = preflight_reasons + list(rule.rejection_reasons)
+        if rule.contract_family == SHORT_UPDOWN_FAMILY and not reasons:
+            reasons.extend(self._short_cex_preflight(rule, now=now))
         if reasons:
             return self._save_rejected(
                 market.market_id, rule, target, reasons, now, audit=audit
@@ -176,10 +173,12 @@ class MarketWorkflowService:
             market.market_id, rule.no_token_id, negative, reasons, audit
         )
         fee_schedule = self._fee_schedule(market.market_id, rule, reasons, audit)
-        threshold = rule.strike
+        threshold: Decimal | None = rule.strike
         secondary: PriceSnapshot | None = None
+        estimate: ProbabilityEstimate | None = None
         if rule.contract_family == SHORT_UPDOWN_FAMILY:
-            primary, threshold, volatility = self._chainlink_inputs(
+            threshold = None
+            primary, estimate = self._cex_direction_inputs(
                 market.market_id, rule, reasons, audit
             )
         else:
@@ -207,9 +206,10 @@ class MarketWorkflowService:
             if not cross_check.ok:
                 reasons.append("price_cross_check_failed")
 
-        estimate: ProbabilityEstimate | None = None
         if (
-            primary is not None
+            rule.contract_family != SHORT_UPDOWN_FAMILY
+            and primary is not None
+            and threshold is not None
             and threshold > 0
             and rule.target_time_utc is not None
         ):
@@ -223,14 +223,14 @@ class MarketWorkflowService:
                 realized_volatility=volatility,
                 operator=rule.exact_operator,
             )
-            if rule.contract_family == SHORT_UPDOWN_FAMILY:
-                estimate = replace(
-                    estimate,
-                    model_name="gbm_window_direction",
-                    model_version="gbm-window-direction-v2",
-                )
             if not estimate.accepted:
                 reasons.append(estimate.rejection_reason or "probability_rejected")
+        if (
+            rule.contract_family == SHORT_UPDOWN_FAMILY
+            and rule.target_time_utc is not None
+            and decision_at >= rule.target_time_utc
+        ):
+            reasons.append("cex_direction_analysis_completed_after_deadline")
 
         yes_execution = calculate_ask_vwap(yes_book.asks, target) if yes_book else None
         no_execution = calculate_ask_vwap(no_book.asks, target) if no_book else None
@@ -285,16 +285,27 @@ class MarketWorkflowService:
         no_spread = _spread_cost(no_book)
         yes_slippage = yes_execution.slippage_per_share or Decimal("0")
         no_slippage = no_execution.slippage_per_share or Decimal("0")
+        yes_probability_for_ev = (
+            estimate.probability_low
+            if rule.contract_family == SHORT_UPDOWN_FAMILY
+            and estimate.probability_low is not None
+            else estimate.base_probability
+        )
+        no_probability_for_ev = (
+            Decimal("1") - estimate.probability_high
+            if rule.contract_family == SHORT_UPDOWN_FAMILY
+            and estimate.probability_high is not None
+            else Decimal("1") - estimate.base_probability
+        )
         yes_net = (
-            estimate.base_probability
+            yes_probability_for_ev
             - (yes_book.midpoint or Decimal("0"))
             - yes_spread
             - yes_slippage
             - yes_fee
         )
-        no_probability = Decimal("1") - estimate.base_probability
         no_net = (
-            no_probability
+            no_probability_for_ev
             - (no_book.midpoint or Decimal("0"))
             - no_spread
             - no_slippage
@@ -338,7 +349,7 @@ class MarketWorkflowService:
             reasons=tuple(estimate.reasons) + (("no_positive_net_ev",) if selected is None else ()),
             observed_at=decision_at,
             received_at=decision_at,
-            source_version=WORKFLOW_VERSION,
+            source_version=_workflow_source_version(rule),
             contract_family=rule.contract_family,
             affirmative_outcome=rule.affirmative_outcome,
             negative_outcome=rule.negative_outcome,
@@ -349,6 +360,19 @@ class MarketWorkflowService:
             input_payloads=tuple(audit.payloads),
         )
         return signal
+
+    def short_signal_due(
+        self,
+        rule: CryptoResolutionRule,
+        *,
+        at: datetime,
+    ) -> bool:
+        """Return whether the sealed short-model checkpoint is actionable now."""
+        return (
+            rule.contract_family == SHORT_UPDOWN_FAMILY
+            and not rule.rejection_reasons
+            and not self._short_cex_preflight(rule, now=_utc(at))
+        )
 
     def _book(
         self,
@@ -548,204 +572,154 @@ class MarketWorkflowService:
             reasons.append(f"coinbase_input_error:{type(exc).__name__}")
             return None
 
-    def _chainlink_inputs(
+    def _short_cex_preflight(
         self,
-        market_id: str,
         rule: CryptoResolutionRule,
-        reasons: list[str],
-        audit: _AnalysisAudit,
-    ) -> tuple[PriceSnapshot | None, Decimal, Decimal | None]:
-        pair = rule.pair
-        window_start = rule.window_start_time_utc
+        *,
+        now: datetime,
+    ) -> list[str]:
+        reasons: list[str] = []
+        if rule.asset not in CEX_DIRECTION_SUPPORTED_ASSETS:
+            reasons.append(f"cex_direction_unsupported_asset:{rule.asset}")
+            return reasons
         target = rule.target_time_utc
-        if not pair or window_start is None or target is None:
-            reasons.append("missing_chainlink_contract_boundary")
-            return None, Decimal("0"), None
+        window_start = rule.window_start_time_utc
+        if target is None or window_start is None:
+            reasons.append("missing_cex_direction_contract_window")
+            return reasons
+        try:
+            artifact = self._cex_artifact()
+        except (FileNotFoundError, ValueError, OSError) as exc:
+            reasons.append(f"cex_direction_model_unavailable:{type(exc).__name__}")
+            return reasons
+        checkpoint = target - timedelta(seconds=artifact.decision_lead_seconds)
+        current = _utc(now)
+        if current < checkpoint:
+            reasons.append("cex_direction_checkpoint_not_reached")
+            return reasons
+        remaining = (target - current).total_seconds()
+        checkpoint_lag = (current - checkpoint).total_seconds()
+        if remaining < self.settings.SHORT_CEX_MIN_REMAINING_SECONDS:
+            reasons.append("cex_direction_checkpoint_too_late")
+        if checkpoint_lag > self.settings.SHORT_CEX_MAX_CHECKPOINT_LAG_SECONDS:
+            reasons.append("cex_direction_checkpoint_expired")
+        return reasons
 
-        authority = self._authoritative_window_price(
-            market_id,
-            rule,
-            reasons,
-            audit,
-        )
-        if authority is None:
-            return None, Decimal("0"), None
-
-        stream = self.chainlink_stream
-        if stream is None:
-            reasons.append("chainlink_reference_stream_disabled")
-            return None, authority.open_price, None
-
-        decision_at = _utc(self.clock())
-        current_tick = stream.latest_tick(
-            pair,
-            at=decision_at,
-            max_age_seconds=self.settings.CHAINLINK_REFERENCE_STREAM_STALE_SECONDS,
-        )
-        if current_tick is None:
-            reasons.append("stale_or_missing_chainlink_current_tick")
-            return None, authority.open_price, None
-        if current_tick.pair != pair:
-            reasons.append("chainlink_pair_mismatch")
-        if current_tick.provider != "chainlink":
-            reasons.append("chainlink_provider_mismatch")
-
-        history_start = decision_at - timedelta(
-            seconds=self.settings.CHAINLINK_VOLATILITY_WINDOW_SECONDS
-        )
-        raw_history = tuple(
-            tick
-            for tick in stream.history(pair, start=history_start, end=decision_at)
-            if tick.fresh
-            and tick.provider == "chainlink"
-            and tick.pair == pair
-            and tick.candle_interval == "tick"
-            and tick.price_field == "value"
-            and tick.received_at <= decision_at
-        )
-        history = _downsample_ticks(
-            raw_history,
-            sample_seconds=self.settings.CHAINLINK_VOLATILITY_SAMPLE_SECONDS,
-        )
-        volatility = annualized_tick_volatility(
-            tuple((tick.provider_timestamp, tick.price) for tick in history),
-            sample_seconds=self.settings.CHAINLINK_VOLATILITY_SAMPLE_SECONDS,
-        )
-        if volatility is None:
-            reasons.append("insufficient_chainlink_volatility_history")
-
-        current_payload = _reference_tick_payload(current_tick)
-        history_payload = {
-            "window_seconds": self.settings.CHAINLINK_VOLATILITY_WINDOW_SECONDS,
-            "sample_seconds": self.settings.CHAINLINK_VOLATILITY_SAMPLE_SECONDS,
-            "annualized_volatility": str(volatility) if volatility is not None else None,
-            "model_input_version": "chainlink-tick-volatility-v1",
-            "ticks": [_reference_tick_payload(tick) for tick in history],
-        }
-        self._record(
-            audit,
-            market_id,
-            "chainlink",
-            "chainlink_current_price",
-            current_payload,
-            current_tick.provider_timestamp,
-            current_tick.received_at,
-            current_tick.source_version,
-        )
-        self._record(
-            audit,
-            market_id,
-            "chainlink",
-            "chainlink_volatility_window",
-            history_payload,
-            history[-1].provider_timestamp if history else None,
-            max((tick.received_at for tick in history), default=decision_at),
-            current_tick.source_version,
-        )
-
-        current_snapshot = _chainlink_snapshot(
-            rule,
-            current_tick,
-            price_kind="data_stream_value",
-        )
-        self.repository.save_price_snapshot(current_snapshot, market_id=market_id)
-        return current_snapshot, authority.open_price, volatility
-
-    def _authoritative_window_price(
+    def _cex_direction_inputs(
         self,
         market_id: str,
         rule: CryptoResolutionRule,
         reasons: list[str],
         audit: _AnalysisAudit,
-    ) -> CryptoWindowPrice | None:
-        pair = rule.pair
-        start = rule.window_start_time_utc
-        end = rule.target_time_utc
+    ) -> tuple[PriceSnapshot | None, ProbabilityEstimate | None]:
+        target = rule.target_time_utc
+        window_start = rule.window_start_time_utc
         interval = rule.candle_interval
-        if not pair or not interval or start is None or end is None:
-            reasons.append("missing_chainlink_contract_boundary")
-            return None
-        key = (rule.asset, interval, _utc(start), _utc(end))
-        price = self._window_price_cache.get(key)
-        if price is None:
-            try:
-                payload = self.client.get_crypto_window_price(
-                    rule.asset,
-                    interval=interval,
-                    start=start,
-                    end=end,
-                )
-                received_at = _utc(self.clock())
-            except Exception as exc:
-                reasons.append(
-                    f"authoritative_window_price_error:{type(exc).__name__}"
-                )
-                return None
-            evidence = crypto_window_price_evidence(
-                payload,
+        if target is None or window_start is None or interval is None:
+            reasons.append("missing_cex_direction_contract_window")
+            return None, None
+        try:
+            artifact = self._cex_artifact()
+            checkpoint = target - timedelta(seconds=artifact.decision_lead_seconds)
+            series = self.binance.get_klines(
+                rule.asset,
+                interval="1m",
+                limit=64,
+                start_time=checkpoint - timedelta(minutes=30),
+                end_time=checkpoint,
+            )
+            features = extract_cex_direction_features(
+                series,
                 asset=rule.asset,
-                pair=pair,
                 interval=interval,
-                start=start,
-                end=end,
-                received_at=received_at,
+                window_start_time_utc=window_start,
+                checkpoint_at=checkpoint,
             )
-            self._record(
-                audit,
-                market_id,
-                POLYMARKET_CRYPTO_PRICE_SOURCE,
-                AUTHORITATIVE_WINDOW_PRICE_KIND,
-                evidence,
-                _utc(start),
-                received_at,
-                POLYMARKET_CRYPTO_PRICE_SOURCE_VERSION,
-            )
-            try:
-                price = parse_crypto_window_price(
-                    payload,
-                    asset=rule.asset,
-                    pair=pair,
-                    interval=interval,
-                    start=start,
-                    end=end,
-                    received_at=received_at,
-                )
-            except ValueError as exc:
-                reasons.append(str(exc))
-                return None
-            self._window_price_cache[key] = price
-            self._window_price_cache.move_to_end(key)
-            while len(self._window_price_cache) > 256:
-                self._window_price_cache.popitem(last=False)
-        else:
-            self._window_price_cache.move_to_end(key)
-            self._record(
-                audit,
-                market_id,
-                POLYMARKET_CRYPTO_PRICE_SOURCE,
-                AUTHORITATIVE_WINDOW_PRICE_KIND,
-                price.raw_payload,
-                price.window_start_time_utc,
-                price.received_at,
-                price.source_version,
-            )
+        except Exception as exc:
+            reasons.append(f"cex_direction_input_error:{type(exc).__name__}")
+            return None, None
 
-        self.repository.save_price_snapshot(
-            PriceSnapshot(
-                asset=rule.asset,
-                quote="USD",
-                provider=POLYMARKET_CRYPTO_PRICE_SOURCE,
-                symbol=pair,
-                price=price.open_price,
-                price_kind="authoritative_window_open",
-                observed_at=price.window_start_time_utc,
-                received_at=price.received_at,
-                source_version=price.source_version,
-                raw_payload=price.raw_payload,
-            ),
-            market_id=market_id,
+        self._record(
+            audit,
+            market_id,
+            "binance",
+            "cex_direction_klines_1m",
+            series.raw_payload,
+            features.latest_close_time,
+            series.received_at,
+            series.source_version,
         )
-        return price
+        self._record(
+            audit,
+            market_id,
+            "local_model",
+            "cex_direction_model",
+            artifact.as_payload(),
+            _training_cutoff(artifact),
+            _utc(self.clock()),
+            CEX_DIRECTION_ARTIFACT_VERSION,
+        )
+        snapshot = PriceSnapshot(
+            asset=rule.asset,
+            quote="USDT",
+            provider="binance",
+            symbol=series.symbol,
+            price=Decimal(str(features.latest_close)),
+            price_kind=f"cex_direction_checkpoint_T-{artifact.decision_lead_seconds}s",
+            observed_at=features.latest_close_time,
+            received_at=series.received_at,
+            source_version=series.source_version,
+            raw_payload=series.raw_payload,
+        )
+        self.repository.save_price_snapshot(snapshot, market_id=market_id)
+
+        probability_value = artifact.predict(features)
+        probability = Decimal(str(probability_value))
+        margin = Decimal(str(artifact.probability_margin))
+        probability_low = max(Decimal("0"), probability - margin)
+        probability_high = min(Decimal("1"), probability + margin)
+        decision_at = _utc(self.clock())
+        hours = Decimal(str((target - decision_at).total_seconds() / 3600))
+        volatility_index = CEX_DIRECTION_FEATURE_NAMES.index(
+            "realized_volatility_10"
+        )
+        volatility = Decimal(str(features.values[volatility_index]))
+        distance = abs(probability - Decimal("0.5"))
+        confidence = (
+            "high"
+            if distance >= Decimal("0.20")
+            else "medium"
+            if distance >= Decimal("0.10")
+            else "low"
+        )
+        estimate = ProbabilityEstimate(
+            accepted=True,
+            rejection_reason=None,
+            threshold=None,
+            spot_price=snapshot.price,
+            time_to_deadline_hours=hours,
+            base_probability=probability,
+            probability_low=probability_low,
+            probability_high=probability_high,
+            realized_volatility=volatility,
+            model_name=CEX_DIRECTION_MODEL_NAME,
+            model_version=artifact.runtime_model_version,
+            confidence=confidence,
+            reasons=(
+                f"closed_cex_checkpoint:T-{artifact.decision_lead_seconds}s",
+                "chainlink_outcome_is_target_only",
+                "conservative_probability_bounds_for_net_ev",
+                f"artifact_hash:{artifact.artifact_hash}",
+            ),
+        )
+        return snapshot, estimate
+
+    def _cex_artifact(self) -> CexDirectionArtifact:
+        if self._cex_direction_artifact is None:
+            self._cex_direction_artifact = CexDirectionArtifact.load(
+                self.settings.SHORT_CEX_MODEL_PATH
+            )
+        return self._cex_direction_artifact
 
     def _save_rejected(
         self,
@@ -797,7 +771,7 @@ class MarketWorkflowService:
             reasons=tuple(dict.fromkeys(reasons)),
             observed_at=now,
             received_at=now,
-            source_version=WORKFLOW_VERSION,
+            source_version=_workflow_source_version(rule),
             contract_family=rule.contract_family,
             affirmative_outcome=rule.affirmative_outcome,
             negative_outcome=rule.negative_outcome,
@@ -853,56 +827,23 @@ def _execution_fee_per_share(
     return total / execution.shares
 
 
-def _chainlink_snapshot(
-    rule: CryptoResolutionRule,
-    tick: ReferencePriceTick,
-    *,
-    price_kind: str,
-) -> PriceSnapshot:
-    return PriceSnapshot(
-        asset=rule.asset,
-        quote="USD",
-        provider=tick.provider,
-        symbol=tick.pair,
-        price=tick.price,
-        price_kind=price_kind,
-        observed_at=_utc(tick.provider_timestamp),
-        received_at=_utc(tick.received_at),
-        source_version=tick.source_version,
-        raw_payload=tick.raw_payload,
-    )
-
-
-def _reference_tick_payload(tick: ReferencePriceTick) -> dict[str, object]:
-    return {
-        "provider": tick.provider,
-        "pair": tick.pair,
-        "candle_interval": tick.candle_interval,
-        "price_field": tick.price_field,
-        "price": str(tick.price),
-        "provider_timestamp": _utc(tick.provider_timestamp).isoformat(),
-        "received_at": _utc(tick.received_at).isoformat(),
-        "fresh": tick.fresh,
-        "sequence": tick.sequence,
-        "payload_hash": tick.payload_hash,
-        "source_version": tick.source_version,
-        "raw_payload": tick.raw_payload,
-    }
-
-
-def _downsample_ticks(
-    ticks: tuple[ReferencePriceTick, ...],
-    *,
-    sample_seconds: int,
-) -> tuple[ReferencePriceTick, ...]:
-    buckets: dict[int, ReferencePriceTick] = {}
-    for tick in sorted(ticks, key=lambda item: item.provider_timestamp):
-        bucket = int(tick.provider_timestamp.timestamp()) // sample_seconds
-        buckets[bucket] = tick
-    return tuple(tick for _, tick in sorted(buckets.items()))
+def _training_cutoff(artifact: CexDirectionArtifact) -> datetime | None:
+    value = artifact.training.get("training_cutoff_time_utc")
+    if not value:
+        return None
+    try:
+        return _utc(datetime.fromisoformat(str(value).replace("Z", "+00:00")))
+    except ValueError:
+        return None
 
 
 def _utc(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=UTC)
     return value.astimezone(UTC)
+
+
+def _workflow_source_version(rule: CryptoResolutionRule) -> str:
+    if rule.contract_family == SHORT_UPDOWN_FAMILY:
+        return SHORT_UPDOWN_WORKFLOW_SOURCE_VERSION
+    return DAILY_WORKFLOW_SOURCE_VERSION

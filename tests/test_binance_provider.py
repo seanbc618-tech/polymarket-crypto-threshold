@@ -62,9 +62,9 @@ def test_latest_snapshot_uses_only_closed_one_minute_candle() -> None:
 def test_unsupported_asset_raises_before_network() -> None:
     provider = BinanceProvider(client=httpx.Client(transport=httpx.MockTransport(lambda _: None)))
     try:
-        provider.get_ticker_price("DOGE")
+        provider.get_ticker_price("HYPE")
     except ValueError as exc:
-        assert "DOGE" in str(exc)
+        assert "HYPE" in str(exc)
     else:
         raise AssertionError("unsupported asset did not raise")
 

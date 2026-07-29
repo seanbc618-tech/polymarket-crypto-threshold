@@ -1,5 +1,5 @@
 [Unit]
-Description=Crypto 5m/15m seven-asset read-only Up/Down shadow monitor
+Description=Crypto CEX-kline to Chainlink Up/Down strategy shadow monitor
 Wants=network-online.target systemd-time-wait-sync.service
 After=network-online.target systemd-time-wait-sync.service
 ConditionPathExists=/etc/polymarket-crypto-updown.env

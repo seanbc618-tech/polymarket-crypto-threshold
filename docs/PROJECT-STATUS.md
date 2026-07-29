@@ -36,8 +36,11 @@ This is evidence acceptance, not a positive model result. All five OOS labels
 belong to one BTC ladder and one settlement timestamp, so they are highly
 correlated. Polymarket midpoint beat both the raw and calibrated probabilities
 on Brier score, log loss, and ECE; calibration made this small sample worse.
-The project remains a research prototype, live trading remains **NO-GO**, and
-Phase 3 trading work is not authorized.
+The project remains a research prototype and real-capital trading remains
+**NO-GO**. The owner has now explicitly prioritized the shortest defensible path
+to a profitable live system and authorized direct VPS shadow/paper deployment
+of a CEX-kline strategy. This authorization does not yet enable signing,
+authenticated reconciliation, or real BUY/SELL.
 
 A separate read-only research expansion now supports the currently observed
 5-minute and 15-minute Polymarket Up/Down contract family for BTC, ETH, SOL,
@@ -50,18 +53,37 @@ research only and does not make Phase 2 accepted. The independent
 direct-connect VPS against
 `/opt/polymarket-crypto-threshold/data/updown-shadow.db`.
 
-Commit `0bae0b7` fixes the Up/Down boundary contract and was activated on the
-VPS at `2026-07-27T19:45:40+08:00`.
-Polymarket's public crypto-window response is the signal and settlement source
-for the immutable window `openPrice`; RTDS supplies only the current tick and
-trailing volatility. Settlement independently requires the endpoint's
-completed `openPrice`/`closePrice`, Gamma's `priceToBeat`/`finalPrice`, and the
-resolved outcome to agree. The boundary fix was activated from marker
-`0bae0b7`; the current filesystem marker is `6002bc4` after offline replay and
-fixed-holdout calibration updates that did not restart services. Up/Down
-remains PID `136544`; Daily remained inactive after its bounded completion and
-forward retained PID `132082`. This correction does not rewrite or legitimize
-the 83 historical mismatched signal rows.
+Commit `0bae0b7` attempted to fix the Up/Down boundary contract and was
+activated on the VPS at `2026-07-27T19:45:40+08:00`. A fresh strict read-only
+audit on 2026-07-29 falsified its key assumption: during an active window the
+public crypto-window response reports `completed=false`, `incomplete=true`,
+and a provisional `openPrice`; after resolution, the completed response can
+publish a materially different `openPrice`. The deployed
+`market-workflow-v2` cached that provisional value. Exact signal/label
+comparison found 28 mismatched v2 signal rows across seven markets, with zero
+outcome-label mismatches. The older v1 history still contains 83 mismatched
+rows across nine markets. Neither version is valid short replay evidence.
+
+The 2026-07-29 audit observed deployment marker `52bc4df`, Forward active as
+PID `180886`, and Up/Down active as PID `152162`, both with zero automatic
+restarts. It also found 4,790 authoritative short labels across seven assets,
+two intervals, and targets from 2026-07-25 through 2026-07-28. Those labels are
+valid supervised targets even though v1/v2 pre-decision boundary inputs are not.
+
+Local workflow v4 now implements the intended strategy directly: Binance spot
+one-minute candles closed at a fixed `T-60s` checkpoint predict the final
+Chainlink Up/Down outcome. Chainlink's opening and closing values are never
+pre-decision model inputs. Training fits only a chronological prefix and seals
+the final 25% as a time holdout; runtime records the exact candles and
+tamper-evident model artifact before comparing conservative probability bounds
+with real target-size CLOB ask VWAP and fees. BTC, ETH, SOL, XRP, DOGE, and BNB
+have verified Binance spot pairs. HYPE fails closed because Binance currently
+has no `HYPEUSDT` spot pair. This implementation is locally verified but has
+not yet been deployed at the time of this source commit.
+
+Settlement remains independent of prediction and still requires the completed
+window `openPrice`/`closePrice`, Gamma `priceToBeat`/`finalPrice`, and resolved
+outcome to agree.
 
 On 2026-07-26, the Up/Down service was briefly restarted twice with explicit
 owner approval. Commit `b8e69d2` first added schema v5 settlement state; commit
@@ -129,11 +151,16 @@ path, or position mutation exists in the runtime. Setting
   XRP/USD, DOGE/USD, BNB/USD, and HYPE/USD. The stream has an idempotent
   lifecycle, reconnect generation, freshness checks, bounded per-pair history,
   and scrubbed health output; it never writes SQLite.
-- Short-window model inputs persist Polymarket's public crypto-window
-  `openPrice`, the current Chainlink tick, and the trailing volatility window
-  before the signal. RTDS `boundary_tick()` is not a model input. Missing or
-  malformed public window data is a hard rejection; Binance is never
-  substituted for a Chainlink contract.
+- Short workflow v4 uses a sealed logistic model with a fixed `T-60s`
+  checkpoint. Inputs are closed Binance one-minute candles only: window/short
+  momentum, VWAP deviation, moving-average spread, RSI, realized volatility,
+  range, candle body/wicks, volume, interval, and asset indicators. Future
+  candles and final Chainlink values are mechanically excluded.
+- Training reads authoritative Chainlink outcomes, splits by target timestamp,
+  fits only the earliest 75%, and refuses to seal unless the final 25% holdout
+  beats a constant training-rate baseline on Brier and log loss with accuracy
+  above chance. Artifact hashes bind features, coefficients, cutoff, metrics,
+  and dataset identity.
 - Short-window net EV still uses token-specific REST books, full ask-depth
   VWAP, and the per-market fee schedule. Stream BBO is only a reprice hint.
 - Chainlink settlement labels require Polymarket's completed public window
@@ -141,8 +168,10 @@ path, or position mutation exists in the runtime. Setting
   final Up/Down outcome to agree. Equality resolves to Up. Incomplete
   resolution metadata or window data remains pending and is retried.
 - Replay manifests are explicitly family-scoped. Daily Binance and short
-  Chainlink labels cannot be mixed, and a signal boundary must match the
-  authoritative settlement boundary before entering replay.
+  Chainlink labels cannot be mixed. New short replay candidates must use
+  `market-workflow-v4`, have no fabricated strike, and include exact CEX candle
+  plus sealed-model inputs. Historical v1/v2/v3 signals remain retained for
+  audit but are ineligible.
 - Versioned SQLite initialization/migration, foreign keys, WAL, transactions,
   source/model versions, and observed/received timestamps.
 - Schema v5 durable settlement scheduling records each market's attempt count,
@@ -151,7 +180,10 @@ path, or position mutation exists in the runtime. Setting
   use a one-hour retry. Candidate selection ranks due rows within separate
   retry and never-attempted groups, then interleaves the groups so one
   incomplete market cannot starve later markets and new candidates cannot
-  permanently starve retries.
+  permanently starve retries. The shadow monitor has a separate settlement
+  batch limit instead of coupling settlement throughput to the analysis limit;
+  short automatic candidates additionally require an analyzed v4 pre-deadline
+  signal.
 - Settlement resolution payloads use a settlement-semantic fingerprint before
   insertion. Repeated Gamma bodies do not create new `external_payloads` rows;
   existing historical duplicates are retained for audit and are not compacted
@@ -654,14 +686,15 @@ capital or Phase 3 trading work.
   must not be relaxed to make the check pass. This is a real short-Up/Down
   settlement-source alignment failure, but it does not retroactively merge
   into or invalidate the separate daily Phase 2 database.
-- A read-only public comparison then queried Polymarket's crypto-window endpoint
-  for all nine affected markets. Its `openPrice` matched the final Gamma
-  `priceToBeat` exactly for eight markets; the ETH 15m pair differed by one
-  adjacent IEEE-754 ULP in JSON representation. An active-window observation
-  also showed that `openPrice` was available before the close and remained
-  unchanged after completion. The implementation permits only this
-  cross-source one-ULP representation case; signal-to-label replay equality
-  remains exact and no ppm/time tolerance was added.
+- A read-only public comparison queried Polymarket's crypto-window endpoint for
+  all nine original v1 mismatch markets. Its completed `openPrice` matched
+  final Gamma `priceToBeat` exactly for eight markets; the ETH 15m pair differed
+  by one adjacent IEEE-754 ULP in JSON representation. The earlier single
+  active-window observation appeared stable, but the larger 2026-07-29 v2
+  audit disproved that generalization: active provisional values changed by
+  approximately 0.23 to 234.914 ppm by completion. The one-ULP allowance
+  remains limited to completed cross-source settlement comparison; no
+  price/time tolerance is allowed for signal-to-label replay.
 - The same Grok snapshot saw all seven latest 5m signals rejected while all
   seven 15m signals were analyzed. A later read-only check found seven analyzed
   signals for each interval without a restart, so that pattern was transient
@@ -692,22 +725,31 @@ capital or Phase 3 trading work.
 - Cross-source Gamma/window comparisons allow exact float identity or one
   adjacent IEEE-754 ULP only to accommodate JSON serialization. Replay still
   requires exact persisted decimal boundary equality.
-- The boundary correction is deployed and has fresh v2 signal/payload evidence,
-  and the v2 settlement code is producing labels for historical pending
-  markets. It does not yet have a same-market post-fix v2 signal/label pair or
-  sealed short replay. Runtime activation and a zero mismatch over zero pairs
-  are not settlement or model acceptance.
-- A fresh short-Up/Down process also needs the configured trailing volatility
-  history before it can analyze a boundary; warm-up rejections are persisted
-  and cannot be treated as market/model failures.
+- The deployed v2 boundary correction is not valid: 28 signal rows across seven
+  labeled markets fail exact boundary equality. They remain permanently
+  excluded. Workflow v4 removes the signal-boundary requirement instead of
+  widening it: the target is direction, and CEX candles are the predictor.
+- Only four days of historical labels are currently available. Even if the
+  sealed one-day holdout is strong, it is model-validation evidence rather than
+  proof of fee-adjusted profitability. Forward VPS paper outcomes must span
+  materially different dates and regimes.
+- HYPE remains unsupported by the first CEX model because Binance has no
+  verified HYPE spot pair. It must reject before CLOB reads rather than silently
+  use another asset or an unvalidated feed.
 - Schema v5 prevents new duplicate resolution rows for unchanged settlement
   meaning, but it does not remove the large historical duplicate payload
   backlog. Missing `finalPrice` remains a legitimate pending state and cannot
   be converted into a label by the scheduler.
-- The current retry quota is deliberately bounded to preserve new-candidate
-  coverage. If unresolved markets arrive faster than retry capacity, the
-  pending/error due backlog can grow even while every group receives service;
-  this needs capacity policy and monitoring before any stronger claim.
+- The deployed retry quota is still tied to `SHADOW_ANALYSIS_LIMIT=14`. A
+  follow-up read-only query found 5,436 pending rows, 3,251 already due. The
+  local fix separates `SHADOW_SETTLEMENT_LIMIT` and sets the Up/Down template to
+  50, while refusing automatic short settlement work without a valid v4
+  analyzed signal. Existing attempt rows remain audit history; this has not
+  been deployed or load-observed.
+- Eight historical `.partial-*` backup artifacts from 2026-07-24 remain on the
+  VPS. Current backups no longer create them, and the cleanup helper already
+  handles new temporary sidecars. Removing the historical files is a separate
+  owner-approved remote mutation.
 - Gamma's 5m/15m discovery metadata can report misleading recurrence values;
   discovery therefore verifies series slug and exact window duration.
 - Stream Market Channel data is BBO-only acceleration, not L2 executable depth;
@@ -770,22 +812,30 @@ valid settlement labels exist. The completed checkpoint therefore remains
 restart reset the 336-hour Forward bound to approximately
 `2026-08-12T02:12:41+08:00`.
 
-In parallel, keep the short-Up/Down evidence in its separate database. The
-authoritative-boundary correction is deployed without weakening replay
-equality, and fresh `market-workflow-v2` signals now link to
-`authoritative_window_price`. Let the configured volatility history warm up,
-then wait for at least one same-market
-`chainlink-polymarket-crypto-price-settlement-v2` label. Require a non-zero v2
-pair count and zero exact v2 signal-to-label mismatch before building a new
-`short_updown` replay. The historical 83 mismatched rows and historical pending
-labels cannot satisfy that gate. Do not merge this evidence into the daily
-Phase 2 acceptance run.
+The 2026-07-29 read-only follow-up found later Forward cycles reporting
+`20 discovered / 18 analyzed`. Two SOL range contracts were correctly rejected
+as unsupported but had already consumed discovery slots. The local monitor now
+requests up to twice the Daily candidate budget, persists all raw/rule evidence,
+then selects only supported rules with asset-balanced round-robin until the
+configured 20-slot budget is full. This change is tested locally and is not
+deployed; the running Forward process remains untouched.
+
+Keep short-Up/Down evidence in its separate database. Never build a v1/v2/v3
+short replay. Train and seal workflow v4 from the existing authoritative
+Chainlink labels, deploy it with `TRADING_DISABLED=true`, then count only new
+v4 signal/label pairs as forward strategy evidence. Do not refit the sealed
+artifact on those forward outcomes or merge short evidence into Daily Phase 2.
+Compare model probabilities with executable CLOB prices and report conservative
+paper PnL after fees; a high prediction accuracy without a price edge is not a
+profit result.
 
 For ongoing VPS observation, check `settlement_attempts` in the Up/Down
 database. A pending row is healthy when its `next_attempt_at` is in the
 future; a growing due backlog, repeated attempt errors, or resolution payload
 IDs advancing for an unchanged semantic response requires review. The
-monitoring guide is read-only and must not repair or compact the backlog.
+monitoring guide is read-only and must not repair or compact the backlog. The
+owner has authorized deployment and an Up/Down-only restart for this strategy.
+Forward must not be restarted.
 
 The formal Daily source is stopped, backed up, and reviewed. The old local smoke
 history is now eligible for owner-approved deletion; it is no longer needed to

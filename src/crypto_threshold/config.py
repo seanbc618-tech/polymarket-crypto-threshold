@@ -58,6 +58,7 @@ class Settings(BaseSettings):
     SHADOW_INTERVAL_SECONDS: float = Field(default=60.0, gt=0)
     SHADOW_DISCOVERY_LIMIT: int = Field(default=20, ge=1, le=500)
     SHADOW_ANALYSIS_LIMIT: int = Field(default=10, ge=1, le=200)
+    SHADOW_SETTLEMENT_LIMIT: int = Field(default=10, ge=1, le=500)
     PAPER_MIN_NET_EV: Decimal = Field(default=Decimal("0.02"), ge=0)
     BINANCE_REFERENCE_STREAM_ENABLED: bool = False
     BINANCE_REFERENCE_STREAM_STALE_SECONDS: float = Field(default=45.0, gt=0)
@@ -68,6 +69,13 @@ class Settings(BaseSettings):
     CHAINLINK_REFERENCE_STREAM_MAX_TICKS_PER_PAIR: int = Field(default=2_000, ge=60)
     CHAINLINK_VOLATILITY_WINDOW_SECONDS: int = Field(default=900, ge=60, le=3600)
     CHAINLINK_VOLATILITY_SAMPLE_SECONDS: int = Field(default=30, ge=1, le=60)
+    SHORT_CEX_MODEL_PATH: str = "data/models/cex-direction-v1.json"
+    SHORT_CEX_MIN_REMAINING_SECONDS: int = Field(default=10, ge=1, le=120)
+    SHORT_CEX_MAX_CHECKPOINT_LAG_SECONDS: int = Field(
+        default=50,
+        ge=1,
+        le=240,
+    )
     CALIBRATION_BINS: int = Field(default=10, ge=2, le=100)
     CALIBRATION_MIN_TRAIN_SIZE: int = Field(default=30, ge=1)
 

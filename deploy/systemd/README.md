@@ -149,9 +149,25 @@ daily Phase 2 window:
 - environment: `/etc/polymarket-crypto-updown.env`
 - database: `/opt/polymarket-crypto-threshold/data/updown-shadow.db`
 - backup directory: `/opt/polymarket-crypto-threshold/backups/updown`
-- assets: BTC, ETH, SOL, XRP, DOGE, BNB, and HYPE
+- prediction assets: BTC, ETH, SOL, XRP, DOGE, and BNB
+- fail-closed asset: HYPE, until a validated CEX candle source exists
 - intervals: 5m and 15m
+- prediction source: Binance public spot 1m closed candles
 - settlement source: Chainlink USD Data Stream
+- sealed model: `/opt/polymarket-crypto-threshold/data/models/cex-direction-v1.json`
+
+Train and seal the model from the existing authoritative labels before
+starting or restarting the service:
+
+```bash
+sudo -n -u crypto-threshold /usr/bin/env --chdir=/tmp \
+  DATABASE_PATH=/opt/polymarket-crypto-threshold/data/updown-shadow.db \
+  SHORT_CEX_MODEL_PATH=/opt/polymarket-crypto-threshold/data/models/cex-direction-v1.json \
+  /opt/polymarket-crypto-threshold/.venv/bin/crypto-threshold \
+  train-short-cex \
+  --db /opt/polymarket-crypto-threshold/data/updown-shadow.db \
+  --output /opt/polymarket-crypto-threshold/data/models/cex-direction-v1.json
+```
 
 Install and start it without restarting `crypto-threshold-shadow.service`:
 
@@ -171,7 +187,7 @@ sudo systemctl enable --now crypto-threshold-updown-shadow.service
 
 This service is public-data, read-only, and unbounded until explicitly stopped.
 Its evidence is exploratory and does not satisfy the daily Phase 2 acceptance
-checker. Starting mid-window can reconstruct the immutable opening boundary
-through Polymarket's public crypto-window endpoint. The workflow still fails
-closed when that response, the current Chainlink tick, or the configured
-volatility history is incomplete.
+checker. The model checkpoint is fixed at `T-60s` and accepts only closed CEX
+candles. Chainlink's completed public crypto-window response is fetched after
+resolution for labeling; its provisional opening value is never a prediction
+input.

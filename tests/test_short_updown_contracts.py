@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -13,10 +14,16 @@ import pytest
 
 from crypto_threshold.adapters.polymarket.base import MarketEventContext
 from crypto_threshold.adapters.polymarket.translator import translate_market
-from crypto_threshold.adapters.prices.stream import ReferencePriceTick
 from crypto_threshold.config import Settings
 from crypto_threshold.domain.assets import ASSET_CONTRACTS, SHORT_UPDOWN_ASSETS
+from crypto_threshold.domain.prices import Kline, KlineSeries
+from crypto_threshold.domain.probability import SHORT_UPDOWN_WORKFLOW_SOURCE_VERSION
 from crypto_threshold.domain.rules import SHORT_UPDOWN_FAMILY, parse_contract
+from crypto_threshold.services.cex_direction_service import (
+    CEX_DIRECTION_FEATURE_NAMES,
+    CEX_DIRECTION_MODEL_NAME,
+    CexDirectionArtifact,
+)
 from crypto_threshold.services.discovery_service import DiscoveryService
 from crypto_threshold.services.market_workflow_service import MarketWorkflowService
 from crypto_threshold.services.replay_service import ReplayService
@@ -249,57 +256,65 @@ class _NoDailyProvider:
         raise AssertionError(f"daily provider must not be used: {name}")
 
 
-class _ChainlinkHistory:
-    def __init__(self, payload: dict[str, Any]) -> None:
-        self.payload = payload
-        market = translate_market(payload, received_at=NOW)
-        assert market.event_start_time is not None
-        self.start = market.event_start_time
-        pair = ASSET_CONTRACTS["BTC"].chainlink_pair
-        self.ticks = tuple(
-            ReferencePriceTick(
-                provider="chainlink",
-                pair=pair,
-                candle_interval="tick",
-                price_field="value",
-                price=Decimal("100000") + Decimal(index),
-                provider_timestamp=self.start + timedelta(seconds=index * 5),
-                received_at=self.start + timedelta(seconds=index * 5, milliseconds=50),
-                fresh=True,
-                source_version="chainlink-test-v1",
-                sequence=str(index),
-                payload_hash=f"{index:064x}",
-                raw_payload={"index": index},
-            )
-            for index in range(25)
+class _CexKlineProvider:
+    def __init__(self, *, checkpoint: datetime) -> None:
+        start = checkpoint - timedelta(minutes=31)
+        self.series = KlineSeries(
+            asset="BTC",
+            quote="USDT",
+            provider="binance",
+            symbol="BTCUSDT",
+            interval="1m",
+            klines=tuple(
+                Kline(
+                    open_time=start + timedelta(minutes=index),
+                    close_time=start
+                    + timedelta(minutes=index + 1)
+                    - timedelta(milliseconds=1),
+                    open=Decimal("100000") + Decimal(index * 10),
+                    high=Decimal("100015") + Decimal(index * 10),
+                    low=Decimal("99995") + Decimal(index * 10),
+                    close=Decimal("100010") + Decimal(index * 10),
+                    volume=Decimal("100") + Decimal(index),
+                )
+                for index in range(31)
+            ),
+            received_at=checkpoint + timedelta(seconds=1),
+            source_version="binance-test-v1",
+            raw_payload=[
+                [
+                    int((checkpoint - timedelta(minutes=1)).timestamp() * 1000),
+                    "100000",
+                    "100020",
+                    "99990",
+                    "100010",
+                    "100",
+                    int((checkpoint - timedelta(milliseconds=1)).timestamp() * 1000),
+                ]
+            ],
         )
 
-    def boundary_tick(
-        self,
-        pair: str,
-        boundary: datetime,
-        *,
-        tolerance_seconds: float,
-    ) -> ReferencePriceTick | None:
-        raise AssertionError("RTDS boundary ticks are not authoritative model inputs")
+    def get_klines(self, *args: Any, **kwargs: Any) -> KlineSeries:
+        return self.series
 
-    def latest_tick(
-        self,
-        pair: str,
-        *,
-        at: datetime | None = None,
-        max_age_seconds: float | None = None,
-    ) -> ReferencePriceTick | None:
-        return self.ticks[-1]
 
-    def history(
-        self,
-        pair: str,
-        *,
-        start: datetime | None = None,
-        end: datetime | None = None,
-    ) -> tuple[ReferencePriceTick, ...]:
-        return self.ticks
+def _write_test_artifact(path: Path) -> None:
+    provisional = CexDirectionArtifact(
+        decision_lead_seconds=60,
+        means=(0.0,) * len(CEX_DIRECTION_FEATURE_NAMES),
+        scales=(1.0,) * len(CEX_DIRECTION_FEATURE_NAMES),
+        weights=(0.0,) * len(CEX_DIRECTION_FEATURE_NAMES),
+        intercept=math.log(4),
+        probability_margin=0.03,
+        training={
+            "training_cutoff_time_utc": (
+                NOW - timedelta(days=1)
+            ).isoformat(),
+            "sample_count": 1000,
+        },
+        artifact_hash="pending",
+    )
+    path.write_text(json.dumps(provisional.as_payload()), encoding="utf-8")
 
 
 def _short_workflow(
@@ -310,33 +325,37 @@ def _short_workflow(
     database = Database(tmp_path / "short.db")
     database.initialize()
     repository = Repository(database)
-    payload = _short_payload("BTC", "5m")
+    payload = _short_payload(
+        "BTC",
+        "5m",
+        start=NOW - timedelta(minutes=4),
+    )
     client = _ShortClient(
         [payload],
         window_price_payload=window_price_payload,
     )
+    model_path = tmp_path / "cex-model.json"
+    _write_test_artifact(model_path)
     settings = Settings(
         DATABASE_PATH=str(database.path),
-        CHAINLINK_REFERENCE_STREAM_STALE_SECONDS=10,
-        CHAINLINK_VOLATILITY_SAMPLE_SECONDS=5,
+        SHORT_CEX_MODEL_PATH=str(model_path),
         _env_file=None,
     )
     workflow = MarketWorkflowService(
         client=client,
         repository=repository,
-        binance=_NoDailyProvider(),  # type: ignore[arg-type]
+        binance=_CexKlineProvider(checkpoint=NOW),  # type: ignore[arg-type]
         coinbase=_NoDailyProvider(),  # type: ignore[arg-type]
         settings=settings,
-        chainlink_stream=_ChainlinkHistory(payload),  # type: ignore[arg-type]
         clock=lambda: NOW + timedelta(seconds=1),
     )
     return workflow, repository, client
 
 
-def test_workflow_uses_authoritative_window_price_and_persists_exact_inputs(
+def test_workflow_predicts_from_closed_cex_klines_without_boundary_input(
     tmp_path: Path,
 ) -> None:
-    workflow, repository, _ = _short_workflow(tmp_path)
+    workflow, repository, client = _short_workflow(tmp_path)
 
     signal = workflow.analyze("market-btc-5m")
 
@@ -344,82 +363,82 @@ def test_workflow_uses_authoritative_window_price_and_persists_exact_inputs(
     assert signal.contract_family == SHORT_UPDOWN_FAMILY
     assert signal.affirmative_outcome == "Up"
     assert signal.negative_outcome == "Down"
-    assert signal.threshold == Decimal("99999.5")
-    assert signal.model_name == "gbm_window_direction"
-    assert signal.model_version == "gbm-window-direction-v2"
-    assert signal.source_version == "market-workflow-v2"
+    assert signal.threshold is None
+    assert signal.model_name == CEX_DIRECTION_MODEL_NAME
+    assert signal.estimated_probability == Decimal("0.8")
+    assert signal.probability_low == Decimal("0.77")
+    assert signal.selected_outcome == "YES"
+    assert signal.source_version == SHORT_UPDOWN_WORKFLOW_SOURCE_VERSION
     roles = {
         str(row["input_role"])
         for row in repository.signal_input_rows(signal.signal_id)
     }
-    authority = next(
-        row
-        for row in repository.signal_input_rows(signal.signal_id)
-        if str(row["input_role"]) == "authoritative_window_price"
-    )
-    assert authority["source"] == "polymarket_site"
-    assert authority["source_version"] == "polymarket-crypto-price-v1"
     assert {
         "market",
         "up_book",
         "down_book",
         "market_info_fee_schedule",
-        "authoritative_window_price",
-        "chainlink_current_price",
-        "chainlink_volatility_window",
+        "cex_direction_klines_1m",
+        "cex_direction_model",
     }.issubset(roles)
+    assert "authoritative_window_price" not in roles
+    assert "chainlink_current_price" not in roles
+    assert not any(read.startswith("crypto_price:") for read in client.reads)
     report = ExternalPayloadSchemaMonitor(repository).inspect_after(0)
     assert report.status == "ok"
 
 
-def test_workflow_reconstructs_boundary_without_using_rtds_boundary_tick(
+def test_workflow_fails_closed_when_sealed_cex_model_is_missing(
     tmp_path: Path,
 ) -> None:
-    workflow, repository, _ = _short_workflow(tmp_path)
-
-    signal = workflow.analyze("market-btc-5m")
-
-    assert signal.status == "analyzed"
-    assert signal.threshold == Decimal("99999.5")
-    roles = {
-        str(row["input_role"])
-        for row in repository.signal_input_rows(signal.signal_id)
-    }
-    assert "authoritative_window_price" in roles
-    assert "chainlink_start_price" not in roles
-    assert repository.table_count("analysis_signals") == 1
-
-
-def test_workflow_caches_immutable_window_open_within_process(
-    tmp_path: Path,
-) -> None:
-    workflow, _, client = _short_workflow(tmp_path)
-
-    first = workflow.analyze("market-btc-5m")
-    second = workflow.analyze("market-btc-5m")
-
-    assert first.threshold == second.threshold == Decimal("99999.5")
-    assert client.reads.count("crypto_price:BTC:5m") == 1
-
-
-def test_workflow_hard_rejects_missing_authoritative_window_price(
-    tmp_path: Path,
-) -> None:
-    workflow, repository, _ = _short_workflow(
-        tmp_path,
-        window_price_payload=_window_price_payload(open_price=None),
-    )
+    workflow, repository, client = _short_workflow(tmp_path)
+    workflow.settings.SHORT_CEX_MODEL_PATH = str(tmp_path / "missing-model.json")
+    workflow._cex_direction_artifact = None
 
     signal = workflow.analyze("market-btc-5m")
 
     assert signal.status == "rejected"
-    assert "missing_authoritative_window_open_price" in signal.reasons
-    assert signal.estimated_probability is None
-    rows = repository.signal_input_rows(signal.signal_id)
-    assert any(
-        str(row["input_role"]) == "authoritative_window_price"
-        for row in rows
+    assert signal.threshold is None
+    assert "cex_direction_model_unavailable:FileNotFoundError" in signal.reasons
+    roles = {
+        str(row["input_role"])
+        for row in repository.signal_input_rows(signal.signal_id)
+    }
+    assert roles == {"market"}
+    assert not any(read.startswith("book:") for read in client.reads)
+    assert repository.table_count("analysis_signals") == 1
+
+
+def test_workflow_waits_until_the_sealed_cex_checkpoint(
+    tmp_path: Path,
+) -> None:
+    workflow, _, client = _short_workflow(tmp_path)
+    workflow.clock = lambda: NOW - timedelta(seconds=1)
+
+    signal = workflow.analyze("market-btc-5m")
+
+    assert signal.status == "rejected"
+    assert "cex_direction_checkpoint_not_reached" in signal.reasons
+    assert not any(read.startswith("book:") for read in client.reads)
+
+
+def test_workflow_never_reads_provisional_chainlink_open_for_prediction(
+    tmp_path: Path,
+) -> None:
+    workflow, _, client = _short_workflow(
+        tmp_path,
+        window_price_payload=_window_price_payload(
+            open_price="1",
+            close_price=None,
+            completed=False,
+        ),
     )
+
+    signal = workflow.analyze("market-btc-5m")
+
+    assert signal.status == "analyzed"
+    assert signal.threshold is None
+    assert not any(read.startswith("crypto_price:") for read in client.reads)
 
 
 def test_discovery_persists_exactly_fourteen_open_markets_without_duplicates(
@@ -451,18 +470,20 @@ def test_chainlink_settlement_tie_resolves_up_and_persists_raw_first(
 ) -> None:
     workflow, repository, client = _short_workflow(tmp_path)
     signal = workflow.analyze("market-btc-5m")
-    assert signal.threshold is not None and signal.deadline is not None
+    boundary = Decimal("99999.5")
+    assert signal.status == "analyzed"
+    assert signal.threshold is None and signal.deadline is not None
     client.window_price_payload = _window_price_payload(
-        open_price=str(signal.threshold),
-        close_price=str(signal.threshold),
+        open_price=str(boundary),
+        close_price=str(boundary),
         completed=True,
     )
     event_id = "event-btc-5m"
     client.resolution_events[event_id] = {
         "id": event_id,
         "eventMetadata": {
-            "priceToBeat": str(signal.threshold),
-            "finalPrice": str(signal.threshold),
+            "priceToBeat": str(boundary),
+            "finalPrice": str(boundary),
         },
         "markets": [
             {
@@ -485,7 +506,7 @@ def test_chainlink_settlement_tie_resolves_up_and_persists_raw_first(
 
     assert label.outcome_yes
     assert label.provider == "chainlink"
-    assert label.strike == label.observed_value == signal.threshold
+    assert label.strike == label.observed_value == boundary
     assert label.source_version == CHAINLINK_SETTLEMENT_SOURCE_VERSION
     assert label.contract_family == SHORT_UPDOWN_FAMILY
     payloads = repository.external_payload_rows_after(label.payload_id - 1)
@@ -505,10 +526,11 @@ def test_chainlink_settlement_tie_resolves_up_and_persists_raw_first(
 def test_chainlink_settlement_waits_for_final_price(tmp_path: Path) -> None:
     workflow, repository, client = _short_workflow(tmp_path)
     signal = workflow.analyze("market-btc-5m")
-    assert signal.threshold is not None and signal.deadline is not None
+    boundary = Decimal("99999.5")
+    assert signal.threshold is None and signal.deadline is not None
     client.resolution_events["event-btc-5m"] = {
         "id": "event-btc-5m",
-        "eventMetadata": {"priceToBeat": str(signal.threshold)},
+        "eventMetadata": {"priceToBeat": str(boundary)},
         "markets": [
             {
                 "id": signal.market_id,
@@ -535,11 +557,12 @@ def test_settlement_rejects_material_gamma_boundary_disagreement(
 ) -> None:
     workflow, repository, client = _short_workflow(tmp_path)
     signal = workflow.analyze("market-btc-5m")
-    assert signal.threshold is not None and signal.deadline is not None
-    authoritative_start = signal.threshold + Decimal("1")
+    endpoint_start = Decimal("99999.5")
+    assert signal.threshold is None and signal.deadline is not None
+    authoritative_start = endpoint_start + Decimal("1")
     client.window_price_payload = _window_price_payload(
-        open_price=str(signal.threshold),
-        close_price=str(signal.threshold + Decimal("1")),
+        open_price=str(endpoint_start),
+        close_price=str(endpoint_start + Decimal("1")),
         completed=True,
     )
     client.resolution_events["event-btc-5m"] = {
@@ -577,7 +600,7 @@ def test_settlement_accepts_single_ulp_json_difference_and_replay_stays_exact(
         window_price_payload=_window_price_payload(open_price=endpoint_open),
     )
     signal = workflow.analyze("market-btc-5m")
-    assert signal.threshold == Decimal(endpoint_open)
+    assert signal.threshold is None
     assert signal.deadline is not None
     endpoint_close = "1877"
     client.window_price_payload = _window_price_payload(
@@ -609,7 +632,7 @@ def test_settlement_accepts_single_ulp_json_difference_and_replay_stays_exact(
         clock=lambda: signal.deadline + timedelta(minutes=1),
     ).settle_market(signal.market_id)
 
-    assert label.strike == signal.threshold
+    assert label.strike == Decimal(endpoint_open)
     replay = ReplayService(repository).build(
         "single-ulp-boundary",
         contract_family=SHORT_UPDOWN_FAMILY,
@@ -617,8 +640,7 @@ def test_settlement_accepts_single_ulp_json_difference_and_replay_stays_exact(
     assert replay.item_count == 1
     assert ReplayService(repository).verify(replay.dataset_id).ok
 
-
-def test_short_shadow_analyzes_all_fourteen_markets_in_one_cycle(
+def test_short_shadow_analyzes_only_due_strategy_markets_in_one_cycle(
     tmp_path: Path,
 ) -> None:
     database = Database(tmp_path / "shadow.db")
@@ -642,6 +664,9 @@ def test_short_shadow_analyzes_all_fourteen_markets_in_one_cycle(
     class Workflow:
         def __init__(self) -> None:
             self.calls: list[str] = []
+
+        def short_signal_due(self, rule: Any, *, at: datetime) -> bool:
+            return True
 
         def analyze(self, market_id: str) -> Any:
             self.calls.append(market_id)

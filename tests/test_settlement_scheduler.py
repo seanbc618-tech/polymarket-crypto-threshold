@@ -6,6 +6,9 @@ from typing import Any
 
 import pytest
 
+from crypto_threshold.domain.probability import (
+    SHORT_UPDOWN_WORKFLOW_SOURCE_VERSION,
+)
 from crypto_threshold.domain.rules import SHORT_UPDOWN_FAMILY
 from crypto_threshold.services.settlement_service import (
     SettlementBatchError,
@@ -80,6 +83,24 @@ def _seed_markets(
                     condition_id,
                     f"BTC Up or Down {index}",
                     NOW.isoformat(),
+                ),
+            )
+            connection.execute(
+                """
+                INSERT INTO analysis_signals (
+                    signal_id, market_id, asset, threshold, deadline,
+                    estimated_probability, status, reasons, observed_at,
+                    received_at, source_version, contract_family
+                ) VALUES (?, ?, 'BTC', NULL, ?, '0.6', 'analyzed', '[]', ?, ?, ?, ?)
+                """,
+                (
+                    f"signal-{index:02d}",
+                    market_id,
+                    target.isoformat(),
+                    (target - timedelta(minutes=10)).isoformat(),
+                    (target - timedelta(minutes=10)).isoformat(),
+                    SHORT_UPDOWN_WORKFLOW_SOURCE_VERSION,
+                    SHORT_UPDOWN_FAMILY,
                 ),
             )
             connection.execute(
@@ -180,6 +201,25 @@ def test_pending_head_does_not_starve_later_candidates(tmp_path: Path) -> None:
     assert {label.market_id for label in labels} == set(later)
     assert client.calls[-2:] == ["event-14", "event-15"]
     assert repository.table_count("settlement_labels") == 2
+
+
+def test_legacy_short_workflow_signals_are_not_scheduled(
+    tmp_path: Path,
+) -> None:
+    service, repository, client, _ = _service(
+        tmp_path,
+        market_count=1,
+    )
+    with repository.database.transaction() as connection:
+        connection.execute(
+            """
+            UPDATE analysis_signals
+            SET source_version = 'market-workflow-v2'
+            """
+        )
+
+    assert service.settle_due(limit=1) == ()
+    assert client.calls == []
 
 
 def test_retry_and_new_candidates_keep_rotating(tmp_path: Path) -> None:
