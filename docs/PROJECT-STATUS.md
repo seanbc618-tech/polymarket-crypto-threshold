@@ -973,14 +973,32 @@ stability under the R1 latency/fill replay.
 
 #### R4 — NautilusTrader-inspired execution-layer spike
 
-**Status:** **PLANNED — last, only after positive executable evidence**
+**Status:** **ISOLATED BLUEPRINT IMPLEMENTED — LIVE ADAPTER BLOCKED**
 
-Study and, if justified, prototype an isolated adapter boundary using
-NautilusTrader's deterministic event model and its documented Polymarket order
+The owner explicitly authorized the non-executable blueprint ahead of the
+later promotion gates. This changes implementation order only for the safe
+domain/state-machine work; it does not authorize a signer, authenticated
+client, order persistence, reconciliation call, VPS activation, or live
+capital.
+
+The blueprint uses NautilusTrader's deterministic event model and its
+documented Polymarket order
 semantics. The spike must cover FAK/FOK/GTC/GTD behavior, quote-versus-token
 quantity, ambiguous submit outcomes, cancellation, and reconciliation. It
-must be pinned to a reviewed stable revision; a fast-moving development or
-release-candidate dependency is not production approval.
+must be pinned to a reviewed release revision; a beta, fast-moving
+development, or release-candidate dependency is not production approval.
+
+The implemented internal boundary pins NautilusTrader release tag `v1.230.0`
+and peeled source commit
+`8160730c7c550480b0a439fb11086a4c4de15f0b` as a reference only. That release
+is explicitly beta, so the package is not installed or imported. The project
+now has venue-neutral order intents, unsigned Polymarket plans, deterministic
+event transitions, event/trade deduplication, IOC-to-FAK translation,
+quote-versus-token validation, conservative GTD/minimum-size checks,
+ambiguous-submit recovery state, deferred cancellation, and a mutation port
+which mechanically refuses submit, cancel, and authenticated reconciliation.
+The exact contract is recorded in
+`docs/NAUTILUS-EXECUTION-BLUEPRINT.md`.
 
 R4 is an execution-engineering milestone, not a strategy-evidence shortcut.
 It remains read-only/no-secret until a separate live-capital authorization
@@ -993,7 +1011,9 @@ R0 challenger measurements
   -> R2 integrity gates
   -> R1 microstructure/execution replay hardening
   -> R3 factor screening
-  -> R4 isolated execution-layer spike
+  -> R4B live-adapter consideration
+
+R4A non-executable blueprint may proceed in parallel and is now implemented.
 ```
 
 R1 may begin collecting raw CEX microstructure data in parallel with R0, but

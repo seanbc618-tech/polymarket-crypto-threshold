@@ -21,6 +21,7 @@ def test_help_and_analyze_contract() -> None:
     replay_build = runner.invoke(app, ["replay-build", "--help"])
     replay_plan = runner.invoke(app, ["replay-plan", "--help"])
     challenger_status = runner.invoke(app, ["short-challenger-status", "--help"])
+    execution_blueprint = runner.invoke(app, ["execution-blueprint", "--help"])
     assert root.exit_code == 0
     assert analyze.exit_code == 0
     assert dashboard.exit_code == 0
@@ -28,6 +29,7 @@ def test_help_and_analyze_contract() -> None:
     assert replay_build.exit_code == 0
     assert replay_plan.exit_code == 0
     assert challenger_status.exit_code == 0
+    assert execution_blueprint.exit_code == 0
     assert "--market" in analyze.output
     assert "market-prob" not in analyze.output
     assert "read-only research dashboard" in dashboard.output
@@ -35,6 +37,18 @@ def test_help_and_analyze_contract() -> None:
     assert "--training-dataset" in replay_build.output
     assert "--training-label-count" in replay_plan.output
     assert "--db" in challenger_status.output
+    assert "non-executable" in execution_blueprint.output
+
+
+def test_execution_blueprint_cli_is_pinned_and_non_executable() -> None:
+    result = runner.invoke(app, ["execution-blueprint"])
+    assert result.exit_code == 0
+    assert "REFERENCE BLUEPRINT ONLY" in result.output
+    assert "v1.230.0" in result.output
+    assert "IOC" in result.output
+    assert "FAK" in result.output
+    assert "live_submission=false" in result.output
+    assert "submit/cancel/authenticated reconciliation not implemented" in result.output
 
 
 def test_init_db_creates_read_only_schema(tmp_path: Path) -> None:

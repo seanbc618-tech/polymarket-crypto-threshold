@@ -43,6 +43,9 @@ from crypto_threshold.services.cex_direction_service import (
 )
 from crypto_threshold.services.discovery_service import DiscoveryService
 from crypto_threshold.services.market_workflow_service import MarketWorkflowService
+from crypto_threshold.services.nautilus_execution_blueprint import (
+    NautilusExecutionBlueprint,
+)
 from crypto_threshold.services.paper_ledger_service import PaperLedgerService
 from crypto_threshold.services.phase2_acceptance_service import Phase2AcceptanceService
 from crypto_threshold.services.pricing_service import cross_check_prices
@@ -875,6 +878,35 @@ def phase2_acceptance(
         console.print(f"  {mark} {check.name}: {check.detail}")
     if not report.accepted:
         raise typer.Exit(code=1)
+
+
+@app.command("execution-blueprint")
+def execution_blueprint() -> None:
+    """Print the pinned, non-executable Nautilus/Polymarket capability map."""
+    manifest = NautilusExecutionBlueprint().manifest()
+    console.print(
+        "[yellow]REFERENCE BLUEPRINT ONLY[/] "
+        f"NautilusTrader {manifest['nautilus_reference_tag']} "
+        f"commit={manifest['nautilus_reference_commit']}"
+    )
+    console.print(
+        "  live_submission=false credentials=false "
+        "unknown_submit=remain_submitted_and_reconcile"
+    )
+    mapping = Table("Nautilus TIF", "Polymarket orderType")
+    tif_mapping = manifest["tif_mapping"]
+    if not isinstance(tif_mapping, dict):
+        raise RuntimeError("execution blueprint TIF mapping is malformed")
+    for tif, venue_type in tif_mapping.items():
+        mapping.add_row(str(tif), str(venue_type))
+    console.print(mapping)
+    console.print(
+        "  quantity: MARKET BUY=quote notional; "
+        "MARKET SELL/LIMIT=token quantity"
+    )
+    console.print(
+        "  mutation lock: submit/cancel/authenticated reconciliation not implemented"
+    )
 
 
 @app.command("short-challenger-status")

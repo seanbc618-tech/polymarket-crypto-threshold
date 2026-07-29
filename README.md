@@ -8,9 +8,11 @@ contracts.
 **Research prototype. Live trading is NO-GO.**
 
 The runtime contains public market-data reads, SQLite audit persistence, replay,
-calibration, and a paper ledger. It does not contain order signing, BUY/SELL
-placement, cancellation, or position mutation. `TRADING_DISABLED` must remain
-`true`.
+calibration, and a paper ledger. It also contains an isolated, non-executable
+NautilusTrader-inspired execution blueprint whose mutation port always raises.
+There is no signer, authenticated venue client, BUY/SELL placement,
+cancellation, reconciliation, or position mutation implementation.
+`TRADING_DISABLED` must remain `true`.
 
 The daily-threshold family supports only contracts whose binding text provides
 all of these facts:
@@ -87,6 +89,7 @@ uv run crypto-threshold replay-build --name <training> --training-label-count 30
 uv run crypto-threshold replay-build --name <combined> --training-dataset <training>
 uv run crypto-threshold replay-verify --dataset <combined>
 uv run crypto-threshold calibrate --dataset <combined>
+uv run crypto-threshold execution-blueprint
 ```
 
 `analyze` accepts a real Gamma market ID or condition ID. It does not accept an
@@ -183,7 +186,8 @@ git diff --check
 ```
 
 See [PROJECT-STATUS.md](docs/PROJECT-STATUS.md) for current evidence, safety
-boundaries, and remaining risks.
+boundaries, and remaining risks. The future execution contract is documented in
+[NAUTILUS-EXECUTION-BLUEPRINT.md](docs/NAUTILUS-EXECUTION-BLUEPRINT.md).
 
 ## License
 
