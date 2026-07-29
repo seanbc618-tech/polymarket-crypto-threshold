@@ -86,6 +86,21 @@ Final settlement independently requires all of the following to agree:
 - Gamma `priceToBeat` and `finalPrice`;
 - Gamma's resolved Up/Down outcome.
 
+## Deployed Snapshot
+
+Commit `c305d62` is active on the VPS with
+`TRADING_DISABLED=true`. The sealed artifact
+`cex-kline-chainlink-direction-v1+49093373ec3e` used 3,151 chronological
+training samples and a later 984-sample holdout. Holdout Brier/log loss were
+`0.114868`/`0.364537`, versus constant-baseline
+`0.249566`/`0.692280`; accuracy was `84.4512%` and ECE was `0.037817`.
+
+At `2026-07-29T04:52:17Z`, the independent Up/Down database contained 42
+workflow-v4 signals, 294 exact input links across all seven required roles,
+zero raw-after-signal violations, nine hypothetical entries, and the first
+completed authoritative v4 label. Empty executable books rejected safely.
+Forward remained on its original PID and was not restarted.
+
 ## Open-source Research Used
 
 No unlicensed project code was copied. The implementation uses standard

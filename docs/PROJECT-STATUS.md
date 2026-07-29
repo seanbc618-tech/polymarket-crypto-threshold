@@ -70,7 +70,7 @@ restarts. It also found 4,790 authoritative short labels across seven assets,
 two intervals, and targets from 2026-07-25 through 2026-07-28. Those labels are
 valid supervised targets even though v1/v2 pre-decision boundary inputs are not.
 
-Local workflow v4 now implements the intended strategy directly: Binance spot
+Workflow v4 now implements the intended strategy directly: Binance spot
 one-minute candles closed at a fixed `T-60s` checkpoint predict the final
 Chainlink Up/Down outcome. Chainlink's opening and closing values are never
 pre-decision model inputs. Training fits only a chronological prefix and seals
@@ -78,8 +78,30 @@ the final 25% as a time holdout; runtime records the exact candles and
 tamper-evident model artifact before comparing conservative probability bounds
 with real target-size CLOB ask VWAP and fees. BTC, ETH, SOL, XRP, DOGE, and BNB
 have verified Binance spot pairs. HYPE fails closed because Binance currently
-has no `HYPEUSDT` spot pair. This implementation is locally verified but has
-not yet been deployed at the time of this source commit.
+has no `HYPEUSDT` spot pair.
+
+Commit `c305d62` is deployed on the VPS and activated for Up/Down only. The
+sealed artifact
+`cex-kline-chainlink-direction-v1+49093373ec3e` trained on 3,151 chronological
+samples and evaluated once on a later 984-sample holdout. Holdout Brier was
+`0.114868` versus constant-baseline `0.249566`; log loss was `0.364537` versus
+`0.692280`; accuracy was `84.4512%` versus `53.6585%`; ECE was `0.037817`.
+These figures establish a historical directional signal, not a trading-profit
+claim.
+
+The first live shadow checkpoint produced workflow-v4 signals and hypothetical
+paper entries. At the `2026-07-29T04:52:17Z` read-only snapshot, the database
+contained 42 v4 signals across 18 markets and two target times: 25 analyzed,
+17 rejected on incomplete/empty executable ask books, and nine paper entries.
+All 42 signals linked exactly seven raw-input roles, no raw payload arrived
+after its signal timestamp, and no signal contained a fabricated threshold.
+The first independent authoritative Chainlink label had naturally settled;
+remaining Gamma resolutions were pending and scheduled for retry. No
+order/fill/trade table exists.
+
+Up/Down is active as PID `190355` with zero automatic restarts. Forward was not
+restarted and remains active as PID `180886` with zero automatic restarts. The
+deployment marker is `c305d6272064409a483e89024026be4fb8c09dda`.
 
 Settlement remains independent of prediction and still requires the completed
 window `openPrice`/`closePrice`, Gamma `priceToBeat`/`finalPrice`, and resolved
@@ -123,8 +145,10 @@ path, or position mutation exists in the runtime. Setting
   `/opt/polymarket-crypto-threshold/data/phase2-forward.db`, has a 14-day hard
   bound, and never writes the completed source database or final backup.
 - The independent short-Up/Down process has the same no-secret/no-proxy safety
-  boundary, disables Binance streaming, uses Polymarket's public crypto-window
-  REST endpoint plus the public Chainlink reference stream, and writes only to
+  boundary. Prediction reads public Binance REST klines and deliberately
+  disables both Binance and Chainlink reference streams. Chainlink is read only
+  after the deadline through the public completed-window settlement path. The
+  process writes only to
   `/opt/polymarket-crypto-threshold/data/updown-shadow.db`.
 
 ## Implemented Scope
@@ -328,6 +352,19 @@ capital or Phase 3 trading work.
 
 ## Verification Evidence
 
+- CEX-direction deployment commit `c305d62` passed `253` tests; Ruff reported no
+  findings; mypy reported no issues in 54 source files; and
+  `git diff --check` was clean. Its source archive SHA-256 was
+  `1c2d9df4b3188f8017f69dd5376bf64be05a11bf7a87edf6036efd1fca8191cb`
+  both locally and on the VPS before extraction. Public-only `doctor` passed
+  before the Up/Down-only restart. Forward retained PID `180886`; Up/Down moved
+  from PID `152162` to `190355`; both report `NRestarts=0`.
+- The deployed v4 audit at `2026-07-29T04:52:17Z` found 42 signals, 294 exact
+  input links across seven required roles, zero raw-after-signal violations,
+  zero non-null thresholds, nine hypothetical entries, and one naturally
+  completed authoritative label. Seventeen signals rejected on empty or
+  incomplete REST ask books; this is expected fail-closed behavior, not a
+  synthetic probability or paper fill.
 - Settlement scheduler follow-up commit `8866fb2` added the long-running
   retry/new rotation test. The final local verification for this change was
   `217 passed`; Ruff reported no findings, mypy reported no issues in 52
@@ -740,12 +777,11 @@ capital or Phase 3 trading work.
   meaning, but it does not remove the large historical duplicate payload
   backlog. Missing `finalPrice` remains a legitimate pending state and cannot
   be converted into a label by the scheduler.
-- The deployed retry quota is still tied to `SHADOW_ANALYSIS_LIMIT=14`. A
-  follow-up read-only query found 5,436 pending rows, 3,251 already due. The
-  local fix separates `SHADOW_SETTLEMENT_LIMIT` and sets the Up/Down template to
-  50, while refusing automatic short settlement work without a valid v4
-  analyzed signal. Existing attempt rows remain audit history; this has not
-  been deployed or load-observed.
+- The historical database still contains a large v1/v2 settlement-attempt
+  backlog. Workflow v4 now uses the separately configured
+  `SHADOW_SETTLEMENT_LIMIT=50`, and automatic short settlement requires a valid
+  analyzed v4 signal. This fix is deployed and the first v4 label completed,
+  but the historical attempt rows remain retained for audit.
 - Eight historical `.partial-*` backup artifacts from 2026-07-24 remain on the
   VPS. Current backups no longer create them, and the cleanup helper already
   handles new temporary sidecars. Removing the historical files is a separate
@@ -773,15 +809,26 @@ capital or Phase 3 trading work.
 
 ## Next Gate
 
-Phase 2 read-only research acceptance is complete. Do not start live Phase 3
-trading work from this result. The next research gate is model validity: keep
-the existing forward collector available for a larger, event-diverse OOS set
-across multiple settlement dates and the supported Daily assets, predefine an
-independent-event minimum, and test any calibration challenger against the raw
-model and Polymarket baseline without refitting the accepted frozen window.
-Repeating the five-hour local smoke or the completed continuous 72-hour run is
-unnecessary. Live order placement remains explicitly outside the approved
-scope and requires a separate design, stronger evidence, and owner approval.
+Phase 2 read-only research acceptance is complete. The owner's primary product
+objective is now explicit: use CEX price action to predict Chainlink-settled
+Up/Down markets, prove executable fee-adjusted edge as quickly as forward data
+allows, and then make a separate live-capital decision. Workflow v4 is the
+deployed strategy path; Phase 2 interface checks are supporting infrastructure,
+not the product objective.
+
+The immediate gate is to keep the sealed v4 artifact unchanged while collecting
+independent VPS signal/label/paper pairs across later windows and market
+regimes. Report directional metrics and executable-price paper PnL separately:
+high prediction accuracy alone does not prove a profitable entry price.
+Repeatedly refitting the model on these forward outcomes is forbidden because
+it would destroy the test. Real BUY/SELL, signing, and authenticated
+reconciliation remain disabled until a separate live-capital authorization
+defines capital, per-trade size, daily loss limit, and kill conditions.
+
+The separate Daily forward collector remains available for a larger,
+event-diverse OOS set across multiple settlement dates and supported Daily
+assets. Repeating the five-hour local smoke or completed continuous 72-hour run
+is unnecessary.
 
 The predeclared event-diverse checkpoint is at least 20 distinct
 `(asset, target_time_utc)` groups across at least seven settlement dates, with
@@ -817,25 +864,26 @@ The 2026-07-29 read-only follow-up found later Forward cycles reporting
 as unsupported but had already consumed discovery slots. The local monitor now
 requests up to twice the Daily candidate budget, persists all raw/rule evidence,
 then selects only supported rules with asset-balanced round-robin until the
-configured 20-slot budget is full. This change is tested locally and is not
-deployed; the running Forward process remains untouched.
+configured 20-slot budget is full. This change is present in the deployed
+source tree but has not been activated in Forward; the running Forward process
+remains untouched.
 
 Keep short-Up/Down evidence in its separate database. Never build a v1/v2/v3
-short replay. Train and seal workflow v4 from the existing authoritative
-Chainlink labels, deploy it with `TRADING_DISABLED=true`, then count only new
-v4 signal/label pairs as forward strategy evidence. Do not refit the sealed
-artifact on those forward outcomes or merge short evidence into Daily Phase 2.
-Compare model probabilities with executable CLOB prices and report conservative
-paper PnL after fees; a high prediction accuracy without a price edge is not a
-profit result.
+short replay. Workflow v4 is trained, sealed, deployed with
+`TRADING_DISABLED=true`, and producing new forward evidence. Count only its new
+signal/label pairs, do not refit the artifact on them, and do not merge short
+evidence into Daily Phase 2. Compare model probabilities with executable CLOB
+prices and report conservative paper PnL after fees; a high prediction accuracy
+without a price edge is not a profit result.
 
 For ongoing VPS observation, check `settlement_attempts` in the Up/Down
 database. A pending row is healthy when its `next_attempt_at` is in the
 future; a growing due backlog, repeated attempt errors, or resolution payload
 IDs advancing for an unchanged semantic response requires review. The
 monitoring guide is read-only and must not repair or compact the backlog. The
-owner has authorized deployment and an Up/Down-only restart for this strategy.
-Forward must not be restarted.
+owner authorized and the project completed deployment plus an Up/Down-only
+restart for this strategy. Forward must not be restarted without a separate
+operational reason.
 
 The formal Daily source is stopped, backed up, and reviewed. The old local smoke
 history is now eligible for owner-approved deletion; it is no longer needed to

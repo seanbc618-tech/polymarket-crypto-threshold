@@ -90,11 +90,8 @@ class PaperLedgerService:
     def settle_open(self, *, limit: int = 1000) -> int:
         settled = 0
         now = _utc(self.clock())
-        for entry in self.repository.open_paper_rows(limit=limit):
-            label = self.repository.get_settlement_label(str(entry["market_id"]))
-            if label is None:
-                continue
-            outcome_yes = bool(label["outcome_yes"])
+        for entry in self.repository.settleable_open_paper_rows(limit=limit):
+            outcome_yes = bool(entry["settlement_outcome_yes"])
             selected = str(entry["outcome"])
             won = (selected == "YES" and outcome_yes) or (
                 selected == "NO" and not outcome_yes
@@ -105,7 +102,7 @@ class PaperLedgerService:
             payout = shares if won else Decimal("0")
             self.repository.settle_paper_entry(
                 entry_id=str(entry["entry_id"]),
-                label_id=str(label["label_id"]),
+                label_id=str(entry["settlement_label_id"]),
                 outcome_yes=outcome_yes,
                 payout_usdc=payout,
                 pnl_usdc=payout - cost - fee,

@@ -1078,6 +1078,39 @@ class Repository:
                 )
             )
 
+    def settleable_open_paper_rows(self, limit: int = 1000) -> list[Row]:
+        """Return open entries that already have their exact decision label.
+
+        Filtering before LIMIT prevents a large historical unlabeled backlog
+        from starving newer entries whose authoritative labels are available.
+        """
+        with closing(self.database.connect()) as connection:
+            return list(
+                connection.execute(
+                    """
+                    SELECT
+                        p.*,
+                        l.label_id AS settlement_label_id,
+                        l.outcome_yes AS settlement_outcome_yes
+                    FROM paper_ledger AS p
+                    JOIN analysis_signals AS s ON s.signal_id = p.signal_id
+                    JOIN settlement_labels AS l ON l.label_id = (
+                        SELECT candidate.label_id
+                        FROM settlement_labels AS candidate
+                        WHERE candidate.market_id = p.market_id
+                          AND candidate.target_time_utc = s.deadline
+                          AND candidate.contract_family = s.contract_family
+                        ORDER BY candidate.received_at DESC, candidate.label_id DESC
+                        LIMIT 1
+                    )
+                    WHERE p.status = 'open'
+                    ORDER BY l.received_at, p.observed_at, p.entry_id
+                    LIMIT ?
+                    """,
+                    (limit,),
+                )
+            )
+
     def settle_paper_entry(
         self,
         *,
