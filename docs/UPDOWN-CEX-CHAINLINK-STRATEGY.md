@@ -88,18 +88,22 @@ Final settlement independently requires all of the following to agree:
 
 ## Deployed Snapshot
 
-Commit `c305d62` is active on the VPS with
+Strategy commit `c305d62` and paper-settlement fix `02fdb72` are active on the
+VPS with
 `TRADING_DISABLED=true`. The sealed artifact
 `cex-kline-chainlink-direction-v1+49093373ec3e` used 3,151 chronological
 training samples and a later 984-sample holdout. Holdout Brier/log loss were
 `0.114868`/`0.364537`, versus constant-baseline
 `0.249566`/`0.692280`; accuracy was `84.4512%` and ECE was `0.037817`.
 
-At `2026-07-29T04:52:17Z`, the independent Up/Down database contained 42
-workflow-v4 signals, 294 exact input links across all seven required roles,
-zero raw-after-signal violations, nine hypothetical entries, and the first
-completed authoritative v4 label. Empty executable books rejected safely.
-Forward remained on its original PID and was not restarted.
+At `2026-07-29T05:03:13Z`, the independent Up/Down database contained 78
+workflow-v4 signals and 541 exact input links across seven input roles. Fully
+analyzed signals had all seven; preflight-expired rejections retained only the
+identity inputs read before rejection. Raw-after-signal violations remained
+zero. The ledger held 12 hypothetical entries and three completed authoritative
+v4 labels. Two entries had settled and both lost, for aggregate hypothetical
+PnL of `-21.263620 USDC`. Empty executable books rejected safely. Forward
+remained on its original PID and was not restarted.
 
 ## Open-source Research Used
 

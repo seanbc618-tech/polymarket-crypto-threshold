@@ -90,18 +90,27 @@ These figures establish a historical directional signal, not a trading-profit
 claim.
 
 The first live shadow checkpoint produced workflow-v4 signals and hypothetical
-paper entries. At the `2026-07-29T04:52:17Z` read-only snapshot, the database
-contained 42 v4 signals across 18 markets and two target times: 25 analyzed,
-17 rejected on incomplete/empty executable ask books, and nine paper entries.
-All 42 signals linked exactly seven raw-input roles, no raw payload arrived
-after its signal timestamp, and no signal contained a fabricated threshold.
-The first independent authoritative Chainlink label had naturally settled;
-remaining Gamma resolutions were pending and scheduled for retry. No
-order/fill/trade table exists.
+paper entries. A follow-up audit exposed a paper-only settlement starvation
+bug: 5,278 historical entries were open, 5,266 were older than the first v4
+entry, and the old code applied its 1,000-row limit before filtering for
+available labels. Commit `02fdb72` now joins each open entry to the exact label
+for its signal deadline and contract family before applying the limit.
 
-Up/Down is active as PID `190355` with zero automatic restarts. Forward was not
+At the `2026-07-29T05:03:13Z` read-only snapshot, the database contained 78 v4
+signals across 36 markets and four target times: 41 analyzed and 37 rejected,
+primarily on incomplete/empty executable ask books. The signals had 541 exact
+links across the seven input roles; every fully analyzed signal had all seven,
+while preflight-expired rejections retained only the inputs read before the
+fail-closed decision. No raw payload arrived after its signal timestamp, and no
+signal contained a fabricated threshold. Three independent
+authoritative Chainlink labels had naturally settled. Two v4 paper entries had
+settled, both incorrectly predicted direction, for aggregate hypothetical PnL
+of `-21.263620 USDC`; ten remained open. The historical labeled-open backlog
+was zero after the fix. No order/fill/trade table exists.
+
+Up/Down is active as PID `192194` with zero automatic restarts. Forward was not
 restarted and remains active as PID `180886` with zero automatic restarts. The
-deployment marker is `c305d6272064409a483e89024026be4fb8c09dda`.
+deployment marker is `02fdb728ee4f25d02c71a2c5a5ab1c4080025940`.
 
 Settlement remains independent of prediction and still requires the completed
 window `openPrice`/`closePrice`, Gamma `priceToBeat`/`finalPrice`, and resolved
@@ -365,6 +374,17 @@ capital or Phase 3 trading work.
   completed authoritative label. Seventeen signals rejected on empty or
   incomplete REST ask books; this is expected fail-closed behavior, not a
   synthetic probability or paper fill.
+- Follow-up commit `02fdb72` fixed paper settlement starvation by selecting
+  only exact signal/label pairs before the 1,000-row batch limit. Its regression
+  test proves a newer labeled entry settles even when an older unlabeled entry
+  is first in the ledger. The complete gate passed `254` tests; Ruff, mypy
+  across 54 source files, and `git diff --check` passed. The deployed archive
+  SHA-256 was
+  `c93037bc75c5424033be341e8d5eae482e8b229d1b5df98ae013cc5284637eef`.
+  After the Up/Down-only restart, two v4 entries settled immediately and the
+  labeled-open historical backlog fell from 2,051 to zero. Both first v4
+  entries lost, for aggregate hypothetical PnL `-21.263620 USDC`; this result
+  is retained rather than filtered or rerun.
 - Settlement scheduler follow-up commit `8866fb2` added the long-running
   retry/new rotation test. The final local verification for this change was
   `217 passed`; Ruff reported no findings, mypy reported no issues in 52
