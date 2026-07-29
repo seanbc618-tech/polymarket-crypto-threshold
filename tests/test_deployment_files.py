@@ -87,6 +87,7 @@ def test_updown_environment_is_separate_public_and_read_only() -> None:
     assert "SHORT_CHALLENGER_ENABLED=true" in content
     assert "SHORT_CHALLENGER_CHECKPOINTS_SECONDS=180,120,60,30" in content
     assert "SHORT_CHALLENGER_LATENCIES_MS=0,100,250,500,1000" in content
+    assert "SHORT_CHALLENGER_MIN_REMAINING_SECONDS=5" in content
     assert "SHADOW_INTERVAL_SECONDS=10" in content
     assert "SHADOW_ANALYSIS_LIMIT=14" in content
     assert "SHADOW_SETTLEMENT_LIMIT=50" in content

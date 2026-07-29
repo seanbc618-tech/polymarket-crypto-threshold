@@ -79,6 +79,7 @@ class Settings(BaseSettings):
     SHORT_CHALLENGER_ENABLED: bool = False
     SHORT_CHALLENGER_CHECKPOINTS_SECONDS: str = "180,120,60,30"
     SHORT_CHALLENGER_LATENCIES_MS: str = "0,100,250,500,1000"
+    SHORT_CHALLENGER_MIN_REMAINING_SECONDS: int = Field(default=5, ge=1, le=60)
     CALIBRATION_BINS: int = Field(default=10, ge=2, le=100)
     CALIBRATION_MIN_TRAIN_SIZE: int = Field(default=30, ge=1)
 

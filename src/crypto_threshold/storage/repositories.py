@@ -1402,9 +1402,9 @@ class Repository:
                     COUNT(DISTINCT observation.target_time_utc) AS target_times,
                     COUNT(DISTINCT observation.asset) AS assets,
                     COUNT(replay.replay_id) AS latency_replays,
-                    SUM(CASE WHEN replay.status = 'open' THEN 1 ELSE 0 END)
+                    COALESCE(SUM(CASE WHEN replay.status = 'open' THEN 1 ELSE 0 END), 0)
                         AS open_replays,
-                    SUM(CASE WHEN replay.status = 'settled' THEN 1 ELSE 0 END)
+                    COALESCE(SUM(CASE WHEN replay.status = 'settled' THEN 1 ELSE 0 END), 0)
                         AS settled_replays,
                     COALESCE(SUM(
                         CASE WHEN replay.status = 'settled'

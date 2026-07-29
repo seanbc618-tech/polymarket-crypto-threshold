@@ -40,6 +40,7 @@ def test_stream_defaults_to_disabled_read_only_shadow() -> None:
     assert settings.SHORT_CHALLENGER_ENABLED is False
     assert settings.short_challenger_checkpoints == (180, 120, 60, 30)
     assert settings.short_challenger_latencies_ms == (0, 100, 250, 500, 1000)
+    assert settings.SHORT_CHALLENGER_MIN_REMAINING_SECONDS == 5
     assert settings.BINANCE_STREAM_PROXY_URL is None
     assert settings.PAPER_MIN_NET_EV == Decimal("0.02")
 

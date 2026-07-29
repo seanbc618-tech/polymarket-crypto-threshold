@@ -417,7 +417,7 @@ class MarketWorkflowService:
             lower_bound = (
                 checkpoints[index + 1]
                 if index + 1 < len(checkpoints)
-                else self.settings.SHORT_CEX_MIN_REMAINING_SECONDS
+                else self.settings.SHORT_CHALLENGER_MIN_REMAINING_SECONDS
             )
             if remaining > lead_seconds or remaining <= lower_bound:
                 continue
@@ -668,7 +668,10 @@ class MarketWorkflowService:
             return reasons
         remaining = (target - current).total_seconds()
         checkpoint_lag = (current - checkpoint).total_seconds()
-        if remaining < self.settings.SHORT_CEX_MIN_REMAINING_SECONDS:
+        min_remaining = self.settings.SHORT_CEX_MIN_REMAINING_SECONDS
+        if decision_lead_seconds is not None:
+            min_remaining = self.settings.SHORT_CHALLENGER_MIN_REMAINING_SECONDS
+        if remaining < min_remaining:
             reasons.append("cex_direction_checkpoint_too_late")
         max_checkpoint_lag = self.settings.SHORT_CEX_MAX_CHECKPOINT_LAG_SECONDS
         if decision_lead_seconds is not None:
@@ -678,7 +681,7 @@ class MarketWorkflowService:
                 lower_bound = (
                     checkpoints[index + 1]
                     if index + 1 < len(checkpoints)
-                    else self.settings.SHORT_CEX_MIN_REMAINING_SECONDS
+                    else self.settings.SHORT_CHALLENGER_MIN_REMAINING_SECONDS
                 )
                 max_checkpoint_lag = lead_seconds - lower_bound
         if checkpoint_lag >= max_checkpoint_lag:
