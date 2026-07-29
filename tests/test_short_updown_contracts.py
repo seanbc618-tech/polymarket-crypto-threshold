@@ -422,6 +422,41 @@ def test_workflow_waits_until_the_sealed_cex_checkpoint(
     assert not any(read.startswith("book:") for read in client.reads)
 
 
+def test_workflow_exposes_exactly_one_unrecorded_challenger_checkpoint(
+    tmp_path: Path,
+) -> None:
+    workflow, _, _ = _short_workflow(tmp_path)
+    payload = _short_payload(
+        "BTC",
+        "5m",
+        start=NOW - timedelta(minutes=4),
+    )
+    rule = parse_contract(translate_market(payload, received_at=NOW), now=NOW)
+    assert rule.target_time_utc is not None
+    target = rule.target_time_utc
+
+    assert workflow.short_checkpoints_due(
+        "market-btc-5m",
+        rule,
+        at=target - timedelta(seconds=179),
+    ) == (180,)
+    assert workflow.short_checkpoints_due(
+        "market-btc-5m",
+        rule,
+        at=target - timedelta(seconds=119),
+    ) == (120,)
+    assert workflow.short_checkpoints_due(
+        "market-btc-5m",
+        rule,
+        at=target - timedelta(seconds=59),
+    ) == (60,)
+    assert workflow.short_checkpoints_due(
+        "market-btc-5m",
+        rule,
+        at=target - timedelta(seconds=29),
+    ) == (30,)
+
+
 def test_workflow_never_reads_provisional_chainlink_open_for_prediction(
     tmp_path: Path,
 ) -> None:
@@ -699,3 +734,104 @@ def test_short_shadow_analyzes_only_due_strategy_markets_in_one_cycle(
     assert cycle.contract_family == SHORT_UPDOWN_FAMILY
     row = repository.list_shadow_cycles(limit=1)[0]
     assert row["contract_family"] == SHORT_UPDOWN_FAMILY
+
+
+def test_short_shadow_collects_all_due_challengers_but_keeps_legacy_paper_at_t60(
+    tmp_path: Path,
+) -> None:
+    database = Database(tmp_path / "challenger-shadow.db")
+    database.initialize()
+    repository = Repository(database)
+    result = SimpleNamespace(
+        market=SimpleNamespace(market_id="market-1"),
+        rule=SimpleNamespace(tradable=True, asset="BTC"),
+    )
+
+    class Discovery:
+        def discover_updown(self, *, limit: int) -> list[Any]:
+            return [result]
+
+    class Workflow:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, int]] = []
+
+        def short_checkpoints_due(
+            self,
+            market_id: str,
+            rule: Any,
+            *,
+            at: datetime,
+        ) -> tuple[int, ...]:
+            return (180, 60)
+
+        def analyze(
+            self,
+            market_id: str,
+            *,
+            decision_lead_seconds: int,
+        ) -> Any:
+            self.calls.append((market_id, decision_lead_seconds))
+            return SimpleNamespace()
+
+        def short_reference_checkpoint_seconds(self) -> int:
+            return 60
+
+    class Challenger:
+        def __init__(self) -> None:
+            self.leads: list[int] = []
+
+        def record(
+            self,
+            signal: Any,
+            rule: Any,
+            *,
+            checkpoint_lead_seconds: int,
+        ) -> Any:
+            self.leads.append(checkpoint_lead_seconds)
+            return SimpleNamespace(
+                observation_created=True,
+                replay_created_count=5,
+                paper_entered_count=2,
+            )
+
+        def settle_open(self) -> int:
+            return 1
+
+    class Paper:
+        def __init__(self) -> None:
+            self.records = 0
+
+        def record(self, signal: Any) -> tuple[Any, bool]:
+            self.records += 1
+            return SimpleNamespace(action="skip"), True
+
+        def settle_open(self) -> int:
+            return 0
+
+    workflow = Workflow()
+    challenger = Challenger()
+    paper = Paper()
+    cycle = ShadowMonitorService(
+        repository=repository,
+        discovery=Discovery(),  # type: ignore[arg-type]
+        workflow=workflow,  # type: ignore[arg-type]
+        paper=paper,  # type: ignore[arg-type]
+        challenger=challenger,  # type: ignore[arg-type]
+        contract_family=SHORT_UPDOWN_FAMILY,
+        discovery_limit=14,
+        analysis_limit=14,
+        clock=lambda: NOW,
+    ).run_once()
+
+    assert workflow.calls == [("market-1", 180), ("market-1", 60)]
+    assert challenger.leads == [180, 60]
+    assert paper.records == 1
+    assert cycle.analyzed_count == 2
+    assert cycle.paper_skipped_count == 1
+    assert cycle.stream_health["short_challenger"] == {
+        "status": "enabled",
+        "observations_created": 2,
+        "latency_replays_created": 10,
+        "paper_entries_created": 4,
+        "paper_entries_settled": 1,
+    }

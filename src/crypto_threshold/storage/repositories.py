@@ -22,6 +22,8 @@ from crypto_threshold.domain.research import (
     PaperLedgerEntry,
     SettlementLabel,
     ShadowCycleResult,
+    ShortChallengerObservation,
+    ShortLatencyReplay,
 )
 from crypto_threshold.domain.rules import CryptoResolutionRule
 from crypto_threshold.storage.db import Database
@@ -466,6 +468,27 @@ class Repository:
                     _json(snapshot.raw_payload),
                 ),
             )
+
+    def latest_market_snapshot_before(
+        self,
+        *,
+        market_id: str,
+        outcome: str,
+        received_at: datetime,
+    ) -> Row | None:
+        """Return the last public book persisted no later than a decision."""
+        with closing(self.database.connect()) as connection:
+            return connection.execute(
+                """
+                SELECT * FROM market_snapshots
+                WHERE market_id = ?
+                  AND UPPER(outcome) = UPPER(?)
+                  AND received_at <= ?
+                ORDER BY received_at DESC, rowid DESC
+                LIMIT 1
+                """,
+                (market_id, outcome, _iso(received_at)),
+            ).fetchone()
 
     def save_fee_schedule(self, schedule: MarketFeeSchedule) -> None:
         with self.database.transaction() as connection:
@@ -1139,6 +1162,313 @@ class Repository:
                 ),
             )
 
+    def has_complete_short_challenger_checkpoint(
+        self,
+        *,
+        market_id: str,
+        target_time_utc: datetime,
+        checkpoint_lead_seconds: int,
+        expected_latency_count: int,
+    ) -> bool:
+        with closing(self.database.connect()) as connection:
+            row = connection.execute(
+                """
+                SELECT COUNT(DISTINCT replay.latency_ms) AS replay_count
+                FROM short_challenger_observations AS observation
+                LEFT JOIN short_latency_replays AS replay
+                  ON replay.observation_id = observation.observation_id
+                WHERE observation.market_id = ?
+                  AND observation.target_time_utc = ?
+                  AND observation.checkpoint_lead_seconds = ?
+                """,
+                (
+                    market_id,
+                    _iso(target_time_utc),
+                    checkpoint_lead_seconds,
+                ),
+            ).fetchone()
+        return (
+            row is not None
+            and int(row["replay_count"]) == expected_latency_count
+        )
+
+    def save_short_challenger_observation(
+        self,
+        observation: ShortChallengerObservation,
+    ) -> tuple[Row, bool]:
+        """Idempotently persist one declared checkpoint and its market baseline."""
+        with self.database.transaction() as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO short_challenger_observations (
+                    observation_id, signal_id, market_id, asset, target_time_utc,
+                    checkpoint_lead_seconds, checkpoint_at, model_version,
+                    model_probability, probability_low, probability_high,
+                    market_yes_midpoint, market_no_midpoint,
+                    market_yes_ask_vwap, market_no_ask_vwap,
+                    yes_spread, no_spread, yes_bid_depth, yes_ask_depth,
+                    no_bid_depth, no_ask_depth, yes_slippage, no_slippage,
+                    target_size_usdc, fee_rate, selected_outcome, model_net_ev,
+                    status, reasons, observed_at, received_at, source_version
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                          ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(market_id, target_time_utc, checkpoint_lead_seconds)
+                DO NOTHING
+                """,
+                (
+                    observation.observation_id,
+                    observation.signal_id,
+                    observation.market_id,
+                    observation.asset,
+                    _iso(observation.target_time_utc),
+                    observation.checkpoint_lead_seconds,
+                    _iso(observation.checkpoint_at),
+                    observation.model_version,
+                    _decimal(observation.model_probability),
+                    _decimal(observation.probability_low),
+                    _decimal(observation.probability_high),
+                    _decimal(observation.market_yes_midpoint),
+                    _decimal(observation.market_no_midpoint),
+                    _decimal(observation.market_yes_ask_vwap),
+                    _decimal(observation.market_no_ask_vwap),
+                    _decimal(observation.yes_spread),
+                    _decimal(observation.no_spread),
+                    _decimal(observation.yes_bid_depth),
+                    _decimal(observation.yes_ask_depth),
+                    _decimal(observation.no_bid_depth),
+                    _decimal(observation.no_ask_depth),
+                    _decimal(observation.yes_slippage),
+                    _decimal(observation.no_slippage),
+                    str(observation.target_size_usdc),
+                    _decimal(observation.fee_rate),
+                    observation.selected_outcome,
+                    _decimal(observation.model_net_ev),
+                    observation.status,
+                    _json(observation.reasons),
+                    _iso(observation.observed_at),
+                    _iso(observation.received_at),
+                    observation.source_version,
+                ),
+            )
+            row = connection.execute(
+                """
+                SELECT *
+                FROM short_challenger_observations
+                WHERE market_id = ?
+                  AND target_time_utc = ?
+                  AND checkpoint_lead_seconds = ?
+                """,
+                (
+                    observation.market_id,
+                    _iso(observation.target_time_utc),
+                    observation.checkpoint_lead_seconds,
+                ),
+            ).fetchone()
+        if row is None:
+            raise RuntimeError("short challenger observation was not persisted")
+        return row, cursor.rowcount == 1
+
+    def save_short_latency_replay(
+        self,
+        replay: ShortLatencyReplay,
+    ) -> tuple[Row, bool]:
+        """Idempotently persist one fixed-latency counterfactual paper entry."""
+        with self.database.transaction() as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO short_latency_replays (
+                    replay_id, observation_id, latency_ms, actual_latency_ms,
+                    outcome, action, status, size_usdc, best_ask, entry_vwap,
+                    fee_per_share, shares, total_fee, net_ev, payload_id, reasons,
+                    requested_at, sampled_at, source_version
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(observation_id, latency_ms) DO NOTHING
+                """,
+                (
+                    replay.replay_id,
+                    replay.observation_id,
+                    replay.latency_ms,
+                    replay.actual_latency_ms,
+                    replay.outcome,
+                    replay.action,
+                    replay.status,
+                    str(replay.size_usdc),
+                    _decimal(replay.best_ask),
+                    _decimal(replay.entry_vwap),
+                    _decimal(replay.fee_per_share),
+                    _decimal(replay.shares),
+                    _decimal(replay.total_fee),
+                    _decimal(replay.net_ev),
+                    replay.payload_id,
+                    _json(replay.reasons),
+                    _iso(replay.requested_at),
+                    _iso(replay.sampled_at),
+                    replay.source_version,
+                ),
+            )
+            row = connection.execute(
+                """
+                SELECT * FROM short_latency_replays
+                WHERE observation_id = ? AND latency_ms = ?
+                """,
+                (replay.observation_id, replay.latency_ms),
+            ).fetchone()
+        if row is None:
+            raise RuntimeError("short latency replay was not persisted")
+        return row, cursor.rowcount == 1
+
+    def has_short_latency_replay(
+        self,
+        *,
+        observation_id: str,
+        latency_ms: int,
+    ) -> bool:
+        with closing(self.database.connect()) as connection:
+            row = connection.execute(
+                """
+                SELECT 1 FROM short_latency_replays
+                WHERE observation_id = ? AND latency_ms = ?
+                LIMIT 1
+                """,
+                (observation_id, latency_ms),
+            ).fetchone()
+        return row is not None
+
+    def settleable_open_short_latency_rows(self, limit: int = 1000) -> list[Row]:
+        with closing(self.database.connect()) as connection:
+            return list(
+                connection.execute(
+                    """
+                    SELECT
+                        replay.*,
+                        label.label_id AS settlement_label_id,
+                        label.outcome_yes AS settlement_outcome_yes
+                    FROM short_latency_replays AS replay
+                    JOIN short_challenger_observations AS observation
+                      ON observation.observation_id = replay.observation_id
+                    JOIN analysis_signals AS signal
+                      ON signal.signal_id = observation.signal_id
+                    JOIN settlement_labels AS label ON label.label_id = (
+                        SELECT candidate.label_id
+                        FROM settlement_labels AS candidate
+                        WHERE candidate.market_id = observation.market_id
+                          AND candidate.target_time_utc = signal.deadline
+                          AND candidate.contract_family = signal.contract_family
+                        ORDER BY candidate.received_at DESC, candidate.label_id DESC
+                        LIMIT 1
+                    )
+                    WHERE replay.status = 'open'
+                    ORDER BY label.received_at, replay.sampled_at, replay.replay_id
+                    LIMIT ?
+                    """,
+                    (limit,),
+                )
+            )
+
+    def settle_short_latency_replay(
+        self,
+        *,
+        replay_id: str,
+        label_id: str,
+        outcome_yes: bool,
+        payout_usdc: Decimal,
+        pnl_usdc: Decimal,
+        settled_at: datetime,
+    ) -> None:
+        with self.database.transaction() as connection:
+            connection.execute(
+                """
+                UPDATE short_latency_replays
+                SET status = 'settled', label_id = ?, outcome_yes = ?,
+                    payout_usdc = ?, pnl_usdc = ?, settled_at = ?
+                WHERE replay_id = ? AND status = 'open'
+                """,
+                (
+                    label_id,
+                    int(outcome_yes),
+                    str(payout_usdc),
+                    str(pnl_usdc),
+                    _iso(settled_at),
+                    replay_id,
+                ),
+            )
+
+    def short_challenger_summary(self) -> Row:
+        with closing(self.database.connect()) as connection:
+            row = connection.execute(
+                """
+                SELECT
+                    COUNT(DISTINCT observation.observation_id) AS observations,
+                    COUNT(DISTINCT observation.target_time_utc) AS target_times,
+                    COUNT(DISTINCT observation.asset) AS assets,
+                    COUNT(replay.replay_id) AS latency_replays,
+                    SUM(CASE WHEN replay.status = 'open' THEN 1 ELSE 0 END)
+                        AS open_replays,
+                    SUM(CASE WHEN replay.status = 'settled' THEN 1 ELSE 0 END)
+                        AS settled_replays,
+                    COALESCE(SUM(
+                        CASE WHEN replay.status = 'settled'
+                             THEN CAST(replay.pnl_usdc AS REAL) ELSE 0 END
+                    ), 0) AS settled_pnl_usdc
+                FROM short_challenger_observations AS observation
+                LEFT JOIN short_latency_replays AS replay
+                  ON replay.observation_id = observation.observation_id
+                """
+            ).fetchone()
+        if row is None:
+            raise RuntimeError("short challenger summary query returned no row")
+        return row
+
+    def short_challenger_checkpoint_summary_rows(self) -> list[Row]:
+        with closing(self.database.connect()) as connection:
+            return list(
+                connection.execute(
+                    """
+                    SELECT
+                        observation.checkpoint_lead_seconds,
+                        COUNT(*) AS observations,
+                        SUM(CASE WHEN observation.status = 'captured' THEN 1 ELSE 0 END)
+                            AS captured,
+                        SUM(CASE WHEN observation.status = 'rejected' THEN 1 ELSE 0 END)
+                            AS rejected,
+                        SUM(CASE WHEN EXISTS (
+                            SELECT 1
+                            FROM settlement_labels AS label
+                            WHERE label.market_id = observation.market_id
+                              AND label.target_time_utc = observation.target_time_utc
+                              AND label.contract_family = 'short_updown'
+                        ) THEN 1 ELSE 0 END) AS labeled
+                    FROM short_challenger_observations AS observation
+                    GROUP BY observation.checkpoint_lead_seconds
+                    ORDER BY observation.checkpoint_lead_seconds DESC
+                    """
+                )
+            )
+
+    def short_latency_summary_rows(self) -> list[Row]:
+        with closing(self.database.connect()) as connection:
+            return list(
+                connection.execute(
+                    """
+                    SELECT
+                        latency_ms,
+                        COUNT(*) AS replays,
+                        SUM(CASE WHEN action = 'enter' THEN 1 ELSE 0 END) AS entered,
+                        SUM(CASE WHEN status = 'skipped' THEN 1 ELSE 0 END) AS skipped,
+                        SUM(CASE WHEN status = 'open' THEN 1 ELSE 0 END) AS open_count,
+                        SUM(CASE WHEN status = 'settled' THEN 1 ELSE 0 END)
+                            AS settled,
+                        COALESCE(SUM(
+                            CASE WHEN status = 'settled'
+                                 THEN CAST(pnl_usdc AS REAL) ELSE 0 END
+                        ), 0) AS settled_pnl_usdc
+                    FROM short_latency_replays
+                    GROUP BY latency_ms
+                    ORDER BY latency_ms
+                    """
+                )
+            )
+
     def save_shadow_cycle(self, cycle: ShadowCycleResult) -> None:
         with self.database.transaction() as connection:
             connection.execute(
@@ -1424,6 +1754,8 @@ class Repository:
             "replay_items",
             "calibration_runs",
             "paper_ledger",
+            "short_challenger_observations",
+            "short_latency_replays",
             "shadow_cycles",
         }
         if table not in allowed:

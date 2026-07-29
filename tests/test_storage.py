@@ -26,6 +26,8 @@ def test_fresh_schema_has_single_market_owner_and_no_trade_tables(tmp_path: Path
         assert "replay_datasets" in tables
         assert "calibration_runs" in tables
         assert "paper_ledger" in tables
+        assert "short_challenger_observations" in tables
+        assert "short_latency_replays" in tables
         assert "shadow_cycles" in tables
         assert "discovered_markets" not in tables
         assert "order_intents" not in tables

@@ -14,7 +14,7 @@ from crypto_threshold.services.settlement_service import (
     SettlementBatchError,
     SettlementService,
 )
-from crypto_threshold.storage.db import Database
+from crypto_threshold.storage.db import SCHEMA_VERSION, Database
 from crypto_threshold.storage.repositories import Repository
 
 NOW = datetime(2026, 7, 26, 12, 0, tzinfo=UTC)
@@ -364,5 +364,5 @@ def test_schema_v5_migration_adds_durable_settlement_attempt_state(
         version = connection.execute(
             "SELECT version FROM schema_meta WHERE id = 1"
         ).fetchone()["version"]
-    assert version == 5
+    assert version == SCHEMA_VERSION
     assert "settlement_attempts" in tables

@@ -258,8 +258,9 @@ def extract_cex_direction_features(
         if seconds != 60:
             raise ValueError("CEX kline history contains a gap")
     latest = recent[-1]
-    if abs((checkpoint - _utc(latest.close_time)).total_seconds()) > 1.1:
-        raise ValueError("latest closed CEX candle does not end at checkpoint")
+    latest_age = (checkpoint - _utc(latest.close_time)).total_seconds()
+    if latest_age < 0 or latest_age >= 60.1:
+        raise ValueError("latest closed CEX candle is not the checkpoint candle")
     window_candle = closed_by_open.get(window_start)
     if window_candle is None:
         raise ValueError("missing CEX candle at Chainlink window start")

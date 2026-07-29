@@ -20,18 +20,27 @@ implemented.
 
 For a contract ending at `T`:
 
-1. The model checkpoint is fixed at `T-60s`.
-2. Only one-minute candles with `close_time <= T-60s` are eligible.
-3. The candle opened at the Chainlink window start must exist.
-4. The most recent 21 closed candles must be contiguous.
-5. The final Chainlink open, close, Gamma result, and any data received after
+1. The sealed v4 reference and its legacy paper ledger remain fixed at
+   `T-60s`.
+2. R0 evaluates that same frozen artifact at the separately declared
+   `T-180s`, `T-120s`, `T-60s`, and `T-30s` checkpoints. It does not refit or
+   recalibrate the artifact.
+3. Only one-minute candles with `close_time <= checkpoint` are eligible. At
+   `T-30s`, the newest eligible one-minute candle normally closes at `T-60s`;
+   no partial candle is used.
+4. The candle opened at the Chainlink window start must exist.
+5. The most recent 21 closed candles must be contiguous.
+6. The final Chainlink open, close, Gamma result, and any data received after
    the checkpoint are forbidden model inputs.
-6. Runtime analysis is allowed from the checkpoint until ten seconds before
+7. Runtime analysis is allowed only inside the checkpoint's declared
+   non-overlapping decision band and until ten seconds before
    settlement. A completed analysis at or after `T` is rejected.
 
-This is a late-window nowcast: for a 5-minute market it observes the first four
-closed one-minute candles and predicts the final Chainlink direction; for a
-15-minute market it observes the first fourteen.
+The legacy T-60 reference is a late-window nowcast: for a 5-minute market it
+observes the first four closed one-minute candles and predicts the final
+Chainlink direction; for a 15-minute market it observes the first fourteen.
+R0 deliberately measures that unchanged model earlier and at T-30 without
+claiming that its original calibration transfers across checkpoints.
 
 ## Features and Model
 
@@ -79,6 +88,23 @@ value. YES uses the lower probability bound and NO uses `1 - upper_bound`. Net
 EV then subtracts the actual target-size ask VWAP and the published taker fee.
 A paper entry requires conservative net EV of at least 2%. The ledger is
 hypothetical and never calls an authenticated client.
+
+When `SHORT_CHALLENGER_ENABLED=true`, R0 writes to the separate
+`short_challenger_observations` and `short_latency_replays` tables. Every
+checkpoint stores the frozen probability, both Polymarket midpoints, executable
+target-size ask VWAPs, fee, full spread, depth, and slippage. For a selected
+paper side, the public REST book is fetched again at requested delays of
+`0/100/250/500/1000 ms`; both requested and actual arrival delay are retained.
+Incomplete, stale, or timestamp-untrusted books are stored as fail-closed
+skips. These counterfactual rows settle only from the same authoritative label
+join used by the short-Up/Down workflow and never enter the legacy T-60 ledger.
+
+Collection status is available without opening the database for writes:
+
+```bash
+crypto-threshold short-challenger-status \
+  --db /opt/polymarket-crypto-threshold/data/updown-shadow.db
+```
 
 Final settlement independently requires all of the following to agree:
 

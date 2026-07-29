@@ -76,6 +76,9 @@ class Settings(BaseSettings):
         ge=1,
         le=240,
     )
+    SHORT_CHALLENGER_ENABLED: bool = False
+    SHORT_CHALLENGER_CHECKPOINTS_SECONDS: str = "180,120,60,30"
+    SHORT_CHALLENGER_LATENCIES_MS: str = "0,100,250,500,1000"
     CALIBRATION_BINS: int = Field(default=10, ge=2, le=100)
     CALIBRATION_MIN_TRAIN_SIZE: int = Field(default=30, ge=1)
 
@@ -119,6 +122,39 @@ class Settings(BaseSettings):
             )
         return raw.rstrip("/")
 
+    @field_validator("SHORT_CHALLENGER_CHECKPOINTS_SECONDS")
+    @classmethod
+    def challenger_checkpoints_are_declared_csv(cls, value: object) -> str:
+        checkpoints = _csv_integers(value, field="SHORT_CHALLENGER_CHECKPOINTS_SECONDS")
+        if (
+            len(checkpoints) != 4
+            or len(set(checkpoints)) != len(checkpoints)
+            or any(checkpoint < 30 or checkpoint > 300 for checkpoint in checkpoints)
+            or tuple(sorted(checkpoints, reverse=True)) != checkpoints
+        ):
+            raise ValueError(
+                "SHORT_CHALLENGER_CHECKPOINTS_SECONDS must be four unique "
+                "descending values within [30, 300]"
+            )
+        return ",".join(str(checkpoint) for checkpoint in checkpoints)
+
+    @field_validator("SHORT_CHALLENGER_LATENCIES_MS")
+    @classmethod
+    def challenger_latencies_are_declared_csv(cls, value: object) -> str:
+        latencies = _csv_integers(value, field="SHORT_CHALLENGER_LATENCIES_MS")
+        if (
+            not latencies
+            or latencies[0] != 0
+            or len(set(latencies)) != len(latencies)
+            or any(latency < 0 or latency > 5_000 for latency in latencies)
+            or tuple(sorted(latencies)) != latencies
+        ):
+            raise ValueError(
+                "SHORT_CHALLENGER_LATENCIES_MS must start at zero and contain "
+                "unique ascending values within [0, 5000]"
+            )
+        return ",".join(str(latency) for latency in latencies)
+
     @field_validator("DASHBOARD_PUBLIC_ORIGIN", mode="before")
     @classmethod
     def public_origin_is_exact_https_origin(cls, value: object) -> str | None:
@@ -145,6 +181,20 @@ class Settings(BaseSettings):
     @property
     def wallet_configured(self) -> bool:
         return bool(self.POLYMARKET_PRIVATE_KEY and self.POLYMARKET_FUNDER)
+
+    @property
+    def short_challenger_checkpoints(self) -> tuple[int, ...]:
+        return _csv_integers(
+            self.SHORT_CHALLENGER_CHECKPOINTS_SECONDS,
+            field="SHORT_CHALLENGER_CHECKPOINTS_SECONDS",
+        )
+
+    @property
+    def short_challenger_latencies_ms(self) -> tuple[int, ...]:
+        return _csv_integers(
+            self.SHORT_CHALLENGER_LATENCIES_MS,
+            field="SHORT_CHALLENGER_LATENCIES_MS",
+        )
 
 
 @lru_cache
@@ -178,3 +228,15 @@ def load_settings(
     if env_file is not None:
         values["_env_file"] = str(env_file)
     return Settings(**values)
+
+
+def _csv_integers(value: object, *, field: str) -> tuple[int, ...]:
+    if not isinstance(value, str):
+        raise ValueError(f"{field} must be a comma-separated string")
+    try:
+        parsed = tuple(int(item.strip()) for item in value.split(",") if item.strip())
+    except ValueError as exc:
+        raise ValueError(f"{field} contains a non-integer value") from exc
+    if not parsed:
+        raise ValueError(f"{field} must not be empty")
+    return parsed

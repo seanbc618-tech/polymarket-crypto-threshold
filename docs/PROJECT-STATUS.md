@@ -863,12 +863,15 @@ The owner approved the following research sequence. This roadmap is
 additive to the sealed v4 artifact: it does not authorize refitting v4, live
 BUY/SELL, signing, authenticated reconciliation, or a merge of Daily and
 short-Up/Down evidence. New challenger data must use a separate database or
-an explicitly versioned, family-scoped evidence namespace. Recording this
-roadmap does not implement any of its work packages.
+an explicitly versioned, family-scoped evidence namespace. Roadmap approval
+alone did not implement a work package; the R0 implementation and its evidence
+boundary are recorded below.
 
 #### R0 — Challenger collection: T-180/T-120/T-60/T-30 + market baseline + latency replay
 
-**Status:** **APPROVED — next implementation priority; not implemented**
+**Status:** **IMPLEMENTED FOR SHADOW COLLECTION**
+
+Activation and settled evidence must still be verified on the VPS.
 
 Collect the same short-Up/Down markets at four pre-declared decision
 checkpoints. At every checkpoint, persist:
@@ -886,6 +889,19 @@ Its minimum report must separate Brier/log loss/ECE, market-baseline error,
 fee-adjusted net EV, assumed fill rate, and paper drawdown/capital lock. A
 directional accuracy improvement without a positive executable edge does not
 pass.
+
+Implementation uses schema v6 and the isolated
+`short_challenger_observations` / `short_latency_replays` tables. The scheduler
+opens non-overlapping T-180/T-120/T-60/T-30 decision bands, applies the sealed
+v4 artifact without refitting, and retains midpoint, target-size ask VWAP, fee,
+spread, depth, and slippage at every checkpoint. For a selected paper side it
+performs fresh public CLOB REST reads at requested 0/100/250/500/1000 ms
+delays, stores actual observed delay, and fails closed on stale, incomplete, or
+timestamp-untrusted books. Only the T-60 signal continues into the legacy
+paper ledger; all four counterfactuals stay in the challenger namespace.
+Authoritative labels later settle challenger rows through the exact
+market/target/family join. Implementation and green tests do not count as
+forward evidence; the first complete VPS checkpoint grid is still required.
 
 #### R1 — HFTBacktest-inspired microstructure and execution replay
 

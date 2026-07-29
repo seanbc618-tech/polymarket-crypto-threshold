@@ -342,6 +342,8 @@ _VALIDATORS: dict[tuple[str, str], Callable[[Any], list[str]]] = {
     ("polymarket_clob", "no_book"): _clob_book,
     ("polymarket_clob", "up_book"): _clob_book,
     ("polymarket_clob", "down_book"): _clob_book,
+    ("polymarket_clob", "challenger_up_book"): _clob_book,
+    ("polymarket_clob", "challenger_down_book"): _clob_book,
     ("polymarket_clob", "market_info_fee_schedule"): _fee_schedule,
     ("binance", "settlement_klines_1m"): _binance_klines,
     ("binance", "volatility_klines_1d"): _binance_klines,

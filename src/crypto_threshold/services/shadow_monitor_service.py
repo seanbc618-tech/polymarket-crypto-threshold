@@ -32,6 +32,7 @@ from crypto_threshold.services.settlement_service import (
     SettlementBatchError,
     SettlementService,
 )
+from crypto_threshold.services.short_challenger_service import ShortChallengerService
 from crypto_threshold.services.stream_research_service import StreamResearchCoordinator
 from crypto_threshold.storage.repositories import Repository
 
@@ -48,6 +49,7 @@ class ShadowMonitorService:
         discovery: DiscoveryService,
         workflow: MarketWorkflowService,
         paper: PaperLedgerService,
+        challenger: ShortChallengerService | None = None,
         settlement: SettlementService | None = None,
         stream_coordinator: StreamResearchCoordinator | None = None,
         reference_stream: BinanceReferencePriceStream | None = None,
@@ -63,6 +65,7 @@ class ShadowMonitorService:
         self.discovery = discovery
         self.workflow = workflow
         self.paper = paper
+        self.challenger = challenger
         self.settlement = settlement
         self.stream_coordinator = stream_coordinator
         self.reference_stream = reference_stream
@@ -106,6 +109,10 @@ class ShadowMonitorService:
         analyzed = 0
         entered = 0
         skipped = 0
+        challenger_observations = 0
+        challenger_replays = 0
+        challenger_entries = 0
+        challenger_settled = 0
         discovered = 0
         rest_fallback = True
         stream_health: dict[str, Any] = {}
@@ -188,11 +195,32 @@ class ShadowMonitorService:
             else:
                 stream_health["chainlink_reference"] = {"status": "disabled"}
 
+            due_checkpoints: dict[str, tuple[int | None, ...]] = {}
             if self.contract_family == SHORT_UPDOWN_FAMILY:
+                if self.challenger is not None:
+                    due_checkpoints = {
+                        market_id: tuple(
+                            self.workflow.short_checkpoints_due(
+                                market_id,
+                                result.rule,
+                                at=started_at,
+                            )
+                        )
+                        for market_id, result in eligible.items()
+                    }
+                else:
+                    due_checkpoints = {
+                        market_id: (None,)
+                        for market_id, result in eligible.items()
+                        if self.workflow.short_signal_due(
+                            result.rule,
+                            at=started_at,
+                        )
+                    }
                 due_market_ids = {
                     market_id
-                    for market_id, result in eligible.items()
-                    if self.workflow.short_signal_due(result.rule, at=started_at)
+                    for market_id, checkpoints in due_checkpoints.items()
+                    if checkpoints
                 }
                 target_market_ids = [
                     market_id
@@ -212,21 +240,62 @@ class ShadowMonitorService:
                     break
                 if market_id not in eligible:
                     continue
-                try:
-                    signal = self.workflow.analyze(market_id)
-                except Exception as exc:
-                    reasons.append(
-                        f"{market_id}:analysis_error:{type(exc).__name__}"
+                checkpoints = (
+                    due_checkpoints.get(market_id, ())
+                    if self.contract_family == SHORT_UPDOWN_FAMILY
+                    else (None,)
+                )
+                for checkpoint_lead_seconds in checkpoints:
+                    if analyzed >= self.analysis_limit:
+                        break
+                    try:
+                        signal = (
+                            self.workflow.analyze(market_id)
+                            if checkpoint_lead_seconds is None
+                            else self.workflow.analyze(
+                                market_id,
+                                decision_lead_seconds=checkpoint_lead_seconds,
+                            )
+                        )
+                    except Exception as exc:
+                        reasons.append(
+                            f"{market_id}:analysis_error:{type(exc).__name__}"
+                        )
+                        continue
+                    analyzed += 1
+                    if (
+                        self.challenger is not None
+                        and checkpoint_lead_seconds is not None
+                    ):
+                        try:
+                            capture = self.challenger.record(
+                                signal,
+                                eligible[market_id].rule,
+                                checkpoint_lead_seconds=checkpoint_lead_seconds,
+                            )
+                            challenger_observations += int(
+                                capture.observation_created
+                            )
+                            challenger_replays += capture.replay_created_count
+                            challenger_entries += capture.paper_entered_count
+                        except Exception as exc:
+                            reasons.append(
+                                f"{market_id}:challenger_error:{type(exc).__name__}"
+                            )
+                    legacy_checkpoint = (
+                        checkpoint_lead_seconds is None
+                        or checkpoint_lead_seconds
+                        == self.workflow.short_reference_checkpoint_seconds()
                     )
-                    continue
-                analyzed += 1
-                entry, created = self.paper.record(signal)
-                if not created:
-                    continue
-                if entry.action == "enter":
-                    entered += 1
-                else:
-                    skipped += 1
+                    if not legacy_checkpoint:
+                        continue
+                    entry, created = self.paper.record(signal)
+                    if not created:
+                        continue
+                    if entry.action == "enter":
+                        entered += 1
+                    else:
+                        skipped += 1
             if self.settlement is not None:
                 try:
                     self.settlement.settle_due(limit=self.settlement_limit)
@@ -237,6 +306,15 @@ class ShadowMonitorService:
                 except Exception as exc:
                     reasons.append(f"settlement_error:{type(exc).__name__}")
             self.paper.settle_open()
+            if self.challenger is not None:
+                challenger_settled = self.challenger.settle_open()
+                stream_health["short_challenger"] = {
+                    "status": "enabled",
+                    "observations_created": challenger_observations,
+                    "latency_replays_created": challenger_replays,
+                    "paper_entries_created": challenger_entries,
+                    "paper_entries_settled": challenger_settled,
+                }
         except Exception as exc:
             reasons.append(f"cycle_error:{type(exc).__name__}")
         try:

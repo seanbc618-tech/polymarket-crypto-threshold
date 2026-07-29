@@ -187,7 +187,9 @@ sudo systemctl enable --now crypto-threshold-updown-shadow.service
 
 This service is public-data, read-only, and unbounded until explicitly stopped.
 Its evidence is exploratory and does not satisfy the daily Phase 2 acceptance
-checker. The model checkpoint is fixed at `T-60s` and accepts only closed CEX
-candles. Chainlink's completed public crypto-window response is fetched after
-resolution for labeling; its provisional opening value is never a prediction
-input.
+checker. The sealed v4 legacy ledger remains fixed at `T-60s`; the isolated R0
+collector evaluates that same frozen artifact at
+`T-180/T-120/T-60/T-30` and samples the selected public CLOB book at
+`0/100/250/500/1000 ms`. Only closed CEX candles are accepted. Chainlink's
+completed public crypto-window response is fetched after resolution for
+labeling; its provisional opening value is never a prediction input.

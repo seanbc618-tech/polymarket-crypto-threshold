@@ -115,6 +115,24 @@ def test_feature_extractor_ignores_every_future_candle() -> None:
     assert repeated.latest_close_time == baseline.latest_close_time
 
 
+def test_feature_extractor_accepts_last_closed_minute_at_t_minus_30() -> None:
+    source = _series("BTC")
+    target = BASE + timedelta(minutes=25)
+    checkpoint = target - timedelta(seconds=30)
+
+    features = extract_cex_direction_features(
+        source,
+        asset="BTC",
+        interval="5m",
+        window_start_time_utc=target - timedelta(minutes=5),
+        checkpoint_at=checkpoint,
+    )
+
+    assert features.checkpoint_at == checkpoint
+    assert features.latest_close_time == target - timedelta(minutes=1, milliseconds=1)
+    assert features.latest_close_time < checkpoint
+
+
 def test_artifact_hash_detects_any_coefficient_tamper(tmp_path: Path) -> None:
     provisional = CexDirectionArtifact(
         decision_lead_seconds=60,

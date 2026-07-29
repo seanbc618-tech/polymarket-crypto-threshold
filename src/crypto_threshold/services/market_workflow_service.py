@@ -93,7 +93,11 @@ class MarketWorkflowService:
         self._cex_direction_artifact: CexDirectionArtifact | None = None
 
     def analyze(
-        self, market_id: str, *, target_size_usdc: Decimal | None = None
+        self,
+        market_id: str,
+        *,
+        target_size_usdc: Decimal | None = None,
+        decision_lead_seconds: int | None = None,
     ) -> AnalysisSignal:
         audit = _AnalysisAudit(run_id=f"analysis:{uuid4()}")
         target = (
@@ -158,7 +162,15 @@ class MarketWorkflowService:
                 pass
         reasons = preflight_reasons + list(rule.rejection_reasons)
         if rule.contract_family == SHORT_UPDOWN_FAMILY and not reasons:
-            reasons.extend(self._short_cex_preflight(rule, now=now))
+            reasons.extend(
+                self._short_cex_preflight(
+                    rule,
+                    now=now,
+                    decision_lead_seconds=decision_lead_seconds,
+                )
+            )
+        elif decision_lead_seconds is not None:
+            reasons.append("decision_lead_override_requires_short_updown")
         if reasons:
             return self._save_rejected(
                 market.market_id, rule, target, reasons, now, audit=audit
@@ -179,7 +191,11 @@ class MarketWorkflowService:
         if rule.contract_family == SHORT_UPDOWN_FAMILY:
             threshold = None
             primary, estimate = self._cex_direction_inputs(
-                market.market_id, rule, reasons, audit
+                market.market_id,
+                rule,
+                reasons,
+                audit,
+                decision_lead_seconds=decision_lead_seconds,
             )
         else:
             primary, volatility = self._binance_inputs(
@@ -373,6 +389,54 @@ class MarketWorkflowService:
             and not rule.rejection_reasons
             and not self._short_cex_preflight(rule, now=_utc(at))
         )
+
+    def short_reference_checkpoint_seconds(self) -> int:
+        """Return the sealed v4 checkpoint retained in the legacy paper ledger."""
+        return self._cex_artifact().decision_lead_seconds
+
+    def short_checkpoints_due(
+        self,
+        market_id: str,
+        rule: CryptoResolutionRule,
+        *,
+        at: datetime,
+    ) -> tuple[int, ...]:
+        """Return unrecorded R0 checkpoints actionable at this wall-clock time."""
+        target = rule.target_time_utc
+        if (
+            rule.contract_family != SHORT_UPDOWN_FAMILY
+            or rule.rejection_reasons
+            or target is None
+        ):
+            return ()
+        due: list[int] = []
+        current = _utc(at)
+        remaining = (target - current).total_seconds()
+        checkpoints = self.settings.short_challenger_checkpoints
+        for index, lead_seconds in enumerate(checkpoints):
+            lower_bound = (
+                checkpoints[index + 1]
+                if index + 1 < len(checkpoints)
+                else self.settings.SHORT_CEX_MIN_REMAINING_SECONDS
+            )
+            if remaining > lead_seconds or remaining <= lower_bound:
+                continue
+            if self.repository.has_complete_short_challenger_checkpoint(
+                market_id=market_id,
+                target_time_utc=target,
+                checkpoint_lead_seconds=lead_seconds,
+                expected_latency_count=len(
+                    self.settings.short_challenger_latencies_ms
+                ),
+            ):
+                continue
+            if not self._short_cex_preflight(
+                rule,
+                now=_utc(at),
+                decision_lead_seconds=lead_seconds,
+            ):
+                due.append(lead_seconds)
+        return tuple(due)
 
     def _book(
         self,
@@ -577,6 +641,7 @@ class MarketWorkflowService:
         rule: CryptoResolutionRule,
         *,
         now: datetime,
+        decision_lead_seconds: int | None = None,
     ) -> list[str]:
         reasons: list[str] = []
         if rule.asset not in CEX_DIRECTION_SUPPORTED_ASSETS:
@@ -592,7 +657,11 @@ class MarketWorkflowService:
         except (FileNotFoundError, ValueError, OSError) as exc:
             reasons.append(f"cex_direction_model_unavailable:{type(exc).__name__}")
             return reasons
-        checkpoint = target - timedelta(seconds=artifact.decision_lead_seconds)
+        lead_seconds = _decision_lead_seconds(
+            artifact,
+            override=decision_lead_seconds,
+        )
+        checkpoint = target - timedelta(seconds=lead_seconds)
         current = _utc(now)
         if current < checkpoint:
             reasons.append("cex_direction_checkpoint_not_reached")
@@ -601,7 +670,18 @@ class MarketWorkflowService:
         checkpoint_lag = (current - checkpoint).total_seconds()
         if remaining < self.settings.SHORT_CEX_MIN_REMAINING_SECONDS:
             reasons.append("cex_direction_checkpoint_too_late")
-        if checkpoint_lag > self.settings.SHORT_CEX_MAX_CHECKPOINT_LAG_SECONDS:
+        max_checkpoint_lag = self.settings.SHORT_CEX_MAX_CHECKPOINT_LAG_SECONDS
+        if decision_lead_seconds is not None:
+            checkpoints = self.settings.short_challenger_checkpoints
+            if lead_seconds in checkpoints:
+                index = checkpoints.index(lead_seconds)
+                lower_bound = (
+                    checkpoints[index + 1]
+                    if index + 1 < len(checkpoints)
+                    else self.settings.SHORT_CEX_MIN_REMAINING_SECONDS
+                )
+                max_checkpoint_lag = lead_seconds - lower_bound
+        if checkpoint_lag >= max_checkpoint_lag:
             reasons.append("cex_direction_checkpoint_expired")
         return reasons
 
@@ -611,6 +691,8 @@ class MarketWorkflowService:
         rule: CryptoResolutionRule,
         reasons: list[str],
         audit: _AnalysisAudit,
+        *,
+        decision_lead_seconds: int | None = None,
     ) -> tuple[PriceSnapshot | None, ProbabilityEstimate | None]:
         target = rule.target_time_utc
         window_start = rule.window_start_time_utc
@@ -620,7 +702,11 @@ class MarketWorkflowService:
             return None, None
         try:
             artifact = self._cex_artifact()
-            checkpoint = target - timedelta(seconds=artifact.decision_lead_seconds)
+            lead_seconds = _decision_lead_seconds(
+                artifact,
+                override=decision_lead_seconds,
+            )
+            checkpoint = target - timedelta(seconds=lead_seconds)
             series = self.binance.get_klines(
                 rule.asset,
                 interval="1m",
@@ -665,7 +751,7 @@ class MarketWorkflowService:
             provider="binance",
             symbol=series.symbol,
             price=Decimal(str(features.latest_close)),
-            price_kind=f"cex_direction_checkpoint_T-{artifact.decision_lead_seconds}s",
+            price_kind=f"cex_direction_checkpoint_T-{lead_seconds}s",
             observed_at=features.latest_close_time,
             received_at=series.received_at,
             source_version=series.source_version,
@@ -706,7 +792,8 @@ class MarketWorkflowService:
             model_version=artifact.runtime_model_version,
             confidence=confidence,
             reasons=(
-                f"closed_cex_checkpoint:T-{artifact.decision_lead_seconds}s",
+                f"closed_cex_checkpoint:T-{lead_seconds}s",
+                "sealed_v4_frozen_reference",
                 "chainlink_outcome_is_target_only",
                 "conservative_probability_bounds_for_net_ev",
                 f"artifact_hash:{artifact.artifact_hash}",
@@ -835,6 +922,17 @@ def _training_cutoff(artifact: CexDirectionArtifact) -> datetime | None:
         return _utc(datetime.fromisoformat(str(value).replace("Z", "+00:00")))
     except ValueError:
         return None
+
+
+def _decision_lead_seconds(
+    artifact: CexDirectionArtifact,
+    *,
+    override: int | None,
+) -> int:
+    lead_seconds = artifact.decision_lead_seconds if override is None else int(override)
+    if lead_seconds < 30 or lead_seconds > 300:
+        raise ValueError("CEX direction decision lead is outside [30, 300]")
+    return lead_seconds
 
 
 def _utc(value: datetime) -> datetime:

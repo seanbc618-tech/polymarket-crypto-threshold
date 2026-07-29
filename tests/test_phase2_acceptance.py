@@ -165,12 +165,12 @@ def test_current_schema_still_requires_settlement_attempts(tmp_path: Path) -> No
 def test_unknown_schema_version_fails_closed(tmp_path: Path) -> None:
     database = _full_evidence_db(tmp_path / "schema-unknown.db")
     with database.transaction() as connection:
-        connection.execute("UPDATE schema_meta SET version = 6 WHERE id = 1")
+        connection.execute("UPDATE schema_meta SET version = 7 WHERE id = 1")
 
     report = Phase2AcceptanceService(Repository(database)).evaluate()
     schema = next(check for check in report.checks if check.name == "schema_integrity")
     assert not schema.ok
-    assert "schema_version=6" in schema.detail
+    assert "schema_version=7" in schema.detail
     assert report.verdict == VERDICT_PENDING
 
 

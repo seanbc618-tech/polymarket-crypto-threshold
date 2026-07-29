@@ -37,6 +37,9 @@ def test_stream_defaults_to_disabled_read_only_shadow() -> None:
     assert settings.SHORT_CEX_MODEL_PATH == "data/models/cex-direction-v1.json"
     assert settings.SHORT_CEX_MIN_REMAINING_SECONDS == 10
     assert settings.SHORT_CEX_MAX_CHECKPOINT_LAG_SECONDS == 50
+    assert settings.SHORT_CHALLENGER_ENABLED is False
+    assert settings.short_challenger_checkpoints == (180, 120, 60, 30)
+    assert settings.short_challenger_latencies_ms == (0, 100, 250, 500, 1000)
     assert settings.BINANCE_STREAM_PROXY_URL is None
     assert settings.PAPER_MIN_NET_EV == Decimal("0.02")
 
@@ -66,3 +69,16 @@ def test_settings_from_env(monkeypatch: object) -> None:
     finally:
         del os.environ["TRADING_DISABLED"]
         get_settings.cache_clear()
+
+
+def test_challenger_grid_rejects_undeclared_or_unsorted_values() -> None:
+    with pytest.raises(ValidationError):
+        Settings(
+            _env_file=None,
+            SHORT_CHALLENGER_CHECKPOINTS_SECONDS="60,180,120,30",
+        )
+    with pytest.raises(ValidationError):
+        Settings(
+            _env_file=None,
+            SHORT_CHALLENGER_LATENCIES_MS="100,0,250",
+        )

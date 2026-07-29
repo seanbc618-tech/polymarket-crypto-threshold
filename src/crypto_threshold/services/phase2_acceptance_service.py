@@ -29,7 +29,7 @@ MIN_SHADOW_HOURS = 72
 MAX_SHADOW_GAP_SECONDS = 300
 MAX_SHADOW_CYCLE_SECONDS = 900
 BINANCE_STREAM_SOURCE_VERSION = "binance-spot-sdk-stream-v1"
-SUPPORTED_EVIDENCE_SCHEMA_VERSIONS = frozenset({3, 4, 5})
+SUPPORTED_EVIDENCE_SCHEMA_VERSIONS = frozenset({3, 4, 5, 6})
 BASE_REQUIRED_TABLES = frozenset(
     {
         "schema_meta",
@@ -52,6 +52,12 @@ BASE_REQUIRED_TABLES = frozenset(
 )
 VERSION_REQUIRED_TABLES = {
     5: frozenset({"settlement_attempts"}),
+    6: frozenset(
+        {
+            "short_challenger_observations",
+            "short_latency_replays",
+        }
+    ),
 }
 REQUIRED_TABLES = BASE_REQUIRED_TABLES.union(
     *(tables for tables in VERSION_REQUIRED_TABLES.values())

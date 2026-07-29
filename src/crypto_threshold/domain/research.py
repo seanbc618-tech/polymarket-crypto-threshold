@@ -96,6 +96,69 @@ class PaperLedgerEntry:
 
 
 @dataclass(frozen=True)
+class ShortChallengerObservation:
+    """One frozen-model and market-baseline capture at a declared checkpoint."""
+
+    observation_id: str
+    signal_id: str
+    market_id: str
+    asset: str
+    target_time_utc: datetime
+    checkpoint_lead_seconds: int
+    checkpoint_at: datetime
+    model_version: str
+    model_probability: Decimal | None
+    probability_low: Decimal | None
+    probability_high: Decimal | None
+    market_yes_midpoint: Decimal | None
+    market_no_midpoint: Decimal | None
+    market_yes_ask_vwap: Decimal | None
+    market_no_ask_vwap: Decimal | None
+    yes_spread: Decimal | None
+    no_spread: Decimal | None
+    yes_bid_depth: Decimal | None
+    yes_ask_depth: Decimal | None
+    no_bid_depth: Decimal | None
+    no_ask_depth: Decimal | None
+    yes_slippage: Decimal | None
+    no_slippage: Decimal | None
+    target_size_usdc: Decimal
+    fee_rate: Decimal | None
+    selected_outcome: str | None
+    model_net_ev: Decimal | None
+    status: str
+    reasons: tuple[str, ...]
+    observed_at: datetime
+    received_at: datetime
+    source_version: str = "short-challenger-r0-v1"
+
+
+@dataclass(frozen=True)
+class ShortLatencyReplay:
+    """Counterfactual paper entry using a public book sampled after fixed latency."""
+
+    replay_id: str
+    observation_id: str
+    latency_ms: int
+    actual_latency_ms: int
+    outcome: str | None
+    action: str
+    status: str
+    size_usdc: Decimal
+    best_ask: Decimal | None
+    entry_vwap: Decimal | None
+    fee_per_share: Decimal | None
+    shares: Decimal | None
+    total_fee: Decimal | None
+    net_ev: Decimal | None
+    payload_id: int | None
+    reasons: tuple[str, ...]
+    requested_at: datetime
+    sampled_at: datetime
+    source_version: str = "short-latency-replay-r0-v1"
+
+
+@dataclass(frozen=True)
 class ShadowCycleResult:
     cycle_id: str
     status: str

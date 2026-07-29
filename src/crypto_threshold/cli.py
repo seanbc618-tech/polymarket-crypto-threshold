@@ -49,6 +49,7 @@ from crypto_threshold.services.pricing_service import cross_check_prices
 from crypto_threshold.services.replay_service import ReplayService
 from crypto_threshold.services.settlement_service import SettlementService
 from crypto_threshold.services.shadow_monitor_service import ShadowMonitorService
+from crypto_threshold.services.short_challenger_service import ShortChallengerService
 from crypto_threshold.services.stream_research_service import StreamResearchCoordinator
 from crypto_threshold.storage.db import SCHEMA_VERSION, Database
 from crypto_threshold.storage.repositories import Repository
@@ -876,6 +877,60 @@ def phase2_acceptance(
         raise typer.Exit(code=1)
 
 
+@app.command("short-challenger-status")
+def short_challenger_status(
+    db_path: Path = typer.Option(
+        Path("crypto_threshold.db"),
+        "--db",
+        help="Read-only Up/Down evidence database",
+    ),
+) -> None:
+    """Show R0 checkpoint, latency, and settled-paper collection counts."""
+    repository = Repository(Database(db_path, read_only=True))
+    summary = repository.short_challenger_summary()
+    console.print(
+        "R0 challenger: "
+        f"observations={summary['observations']} "
+        f"targets={summary['target_times']} "
+        f"assets={summary['assets']} "
+        f"latency_replays={summary['latency_replays']} "
+        f"settled={summary['settled_replays']} "
+        f"paper_pnl={float(summary['settled_pnl_usdc']):.6f}"
+    )
+
+    checkpoint_table = Table("Checkpoint", "Observed", "Captured", "Rejected", "Labeled")
+    for row in repository.short_challenger_checkpoint_summary_rows():
+        checkpoint_table.add_row(
+            f"T-{row['checkpoint_lead_seconds']}s",
+            str(row["observations"]),
+            str(row["captured"]),
+            str(row["rejected"]),
+            str(row["labeled"]),
+        )
+    console.print(checkpoint_table)
+
+    latency_table = Table(
+        "Latency",
+        "Replays",
+        "Entered",
+        "Skipped",
+        "Open",
+        "Settled",
+        "Settled PnL",
+    )
+    for row in repository.short_latency_summary_rows():
+        latency_table.add_row(
+            f"{row['latency_ms']} ms",
+            str(row["replays"]),
+            str(row["entered"]),
+            str(row["skipped"]),
+            str(row["open_count"]),
+            str(row["settled"]),
+            f"{float(row['settled_pnl_usdc']):.6f}",
+        )
+    console.print(latency_table)
+
+
 @app.command("shadow")
 def shadow(
     once: bool = typer.Option(False, "--once", help="Run exactly one research cycle"),
@@ -969,6 +1024,21 @@ def shadow(
         settings=settings,
         stream_coordinator=stream_coordinator,
     )
+    challenger = (
+        ShortChallengerService(
+            repository,
+            client,
+            min_net_ev=settings.PAPER_MIN_NET_EV,
+            checkpoints_seconds=settings.short_challenger_checkpoints,
+            latencies_ms=settings.short_challenger_latencies_ms,
+            max_book_age_seconds=settings.MAX_BOOK_AGE_SECONDS,
+        )
+        if (
+            settings.SHADOW_CONTRACT_FAMILY == SHORT_UPDOWN_FAMILY
+            and settings.SHORT_CHALLENGER_ENABLED
+        )
+        else None
+    )
     monitor = ShadowMonitorService(
         repository=repository,
         discovery=DiscoveryService(client, repository),
@@ -976,6 +1046,7 @@ def shadow(
         paper=PaperLedgerService(
             repository, min_net_ev=settings.PAPER_MIN_NET_EV
         ),
+        challenger=challenger,
         settlement=SettlementService(
             repository=repository,
             binance=binance,

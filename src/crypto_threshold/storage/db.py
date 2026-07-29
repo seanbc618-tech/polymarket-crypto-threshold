@@ -7,7 +7,7 @@ from contextlib import closing, contextmanager
 from pathlib import Path
 from sqlite3 import Connection, Row, complete_statement, connect
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -325,6 +325,74 @@ CREATE TABLE IF NOT EXISTS paper_ledger (
     UNIQUE (signal_id, policy_version)
 );
 
+CREATE TABLE IF NOT EXISTS short_challenger_observations (
+    observation_id TEXT PRIMARY KEY,
+    signal_id TEXT NOT NULL REFERENCES analysis_signals(signal_id),
+    market_id TEXT NOT NULL REFERENCES markets(market_id),
+    asset TEXT NOT NULL,
+    target_time_utc TEXT NOT NULL,
+    checkpoint_lead_seconds INTEGER NOT NULL
+        CHECK (checkpoint_lead_seconds BETWEEN 30 AND 300),
+    checkpoint_at TEXT NOT NULL,
+    model_version TEXT NOT NULL,
+    model_probability TEXT,
+    probability_low TEXT,
+    probability_high TEXT,
+    market_yes_midpoint TEXT,
+    market_no_midpoint TEXT,
+    market_yes_ask_vwap TEXT,
+    market_no_ask_vwap TEXT,
+    yes_spread TEXT,
+    no_spread TEXT,
+    yes_bid_depth TEXT,
+    yes_ask_depth TEXT,
+    no_bid_depth TEXT,
+    no_ask_depth TEXT,
+    yes_slippage TEXT,
+    no_slippage TEXT,
+    target_size_usdc TEXT NOT NULL,
+    fee_rate TEXT,
+    selected_outcome TEXT,
+    model_net_ev TEXT,
+    status TEXT NOT NULL CHECK (status IN ('captured', 'rejected')),
+    reasons TEXT NOT NULL,
+    observed_at TEXT NOT NULL,
+    received_at TEXT NOT NULL,
+    source_version TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (market_id, target_time_utc, checkpoint_lead_seconds)
+);
+
+CREATE TABLE IF NOT EXISTS short_latency_replays (
+    replay_id TEXT PRIMARY KEY,
+    observation_id TEXT NOT NULL
+        REFERENCES short_challenger_observations(observation_id) ON DELETE CASCADE,
+    latency_ms INTEGER NOT NULL CHECK (latency_ms >= 0),
+    actual_latency_ms INTEGER NOT NULL CHECK (actual_latency_ms >= 0),
+    outcome TEXT,
+    action TEXT NOT NULL CHECK (action IN ('enter', 'skip')),
+    status TEXT NOT NULL CHECK (status IN ('skipped', 'open', 'settled')),
+    size_usdc TEXT NOT NULL,
+    best_ask TEXT,
+    entry_vwap TEXT,
+    fee_per_share TEXT,
+    shares TEXT,
+    total_fee TEXT,
+    net_ev TEXT,
+    payload_id INTEGER REFERENCES external_payloads(id),
+    label_id TEXT REFERENCES settlement_labels(label_id),
+    outcome_yes INTEGER,
+    payout_usdc TEXT,
+    pnl_usdc TEXT,
+    reasons TEXT NOT NULL,
+    requested_at TEXT NOT NULL,
+    sampled_at TEXT NOT NULL,
+    settled_at TEXT,
+    source_version TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (observation_id, latency_ms)
+);
+
 CREATE TABLE IF NOT EXISTS shadow_cycles (
     cycle_id TEXT PRIMARY KEY,
     mode TEXT NOT NULL CHECK (mode = 'shadow'),
@@ -423,6 +491,12 @@ ON replay_items(dataset_id, ordinal);
 
 CREATE INDEX IF NOT EXISTS idx_paper_ledger_market_status
 ON paper_ledger(market_id, policy_version, status);
+
+CREATE INDEX IF NOT EXISTS idx_short_challenger_target
+ON short_challenger_observations(target_time_utc, asset, checkpoint_lead_seconds);
+
+CREATE INDEX IF NOT EXISTS idx_short_latency_status
+ON short_latency_replays(status, observation_id, latency_ms);
 
 CREATE INDEX IF NOT EXISTS idx_shadow_cycles_started
 ON shadow_cycles(started_at DESC);

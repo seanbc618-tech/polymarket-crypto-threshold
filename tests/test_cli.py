@@ -20,18 +20,21 @@ def test_help_and_analyze_contract() -> None:
     shadow = runner.invoke(app, ["shadow", "--help"])
     replay_build = runner.invoke(app, ["replay-build", "--help"])
     replay_plan = runner.invoke(app, ["replay-plan", "--help"])
+    challenger_status = runner.invoke(app, ["short-challenger-status", "--help"])
     assert root.exit_code == 0
     assert analyze.exit_code == 0
     assert dashboard.exit_code == 0
     assert shadow.exit_code == 0
     assert replay_build.exit_code == 0
     assert replay_plan.exit_code == 0
+    assert challenger_status.exit_code == 0
     assert "--market" in analyze.output
     assert "market-prob" not in analyze.output
     assert "read-only research dashboard" in dashboard.output
     assert "--duration-hours" in shadow.output
     assert "--training-dataset" in replay_build.output
     assert "--training-label-count" in replay_plan.output
+    assert "--db" in challenger_status.output
 
 
 def test_init_db_creates_read_only_schema(tmp_path: Path) -> None:
@@ -159,6 +162,20 @@ def test_short_shadow_requires_sealed_cex_model(
 
     assert result.exit_code == 2
     assert "requires a valid sealed CEX model" in result.output
+
+
+def test_short_challenger_status_reads_empty_r0_tables(tmp_path: Path) -> None:
+    db_path = tmp_path / "challenger-status.db"
+    assert runner.invoke(app, ["init-db", "--db-path", str(db_path)]).exit_code == 0
+
+    result = runner.invoke(
+        app,
+        ["short-challenger-status", "--db", str(db_path)],
+    )
+
+    assert result.exit_code == 0
+    assert "observations=0" in result.output
+    assert "latency_replays=0" in result.output
 
 
 def test_empty_replay_build_is_persisted_but_fails_acceptance(
