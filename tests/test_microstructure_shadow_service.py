@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -143,6 +144,7 @@ def test_one_cycle_persists_features_and_preregistered_factor_plan(tmp_path: Pat
         event_batch_limit=100,
         integrity_sample_limit=102,
         stream_ready_timeout_seconds=1,
+        frozen_model_version="cex-kline-chainlink-direction-v1+49093373ec3e",
         warmup_seconds=0,
     )
     service = MicrostructureShadowService(
@@ -167,6 +169,18 @@ def test_one_cycle_persists_features_and_preregistered_factor_plan(tmp_path: Pat
     assert summary["integrity_runs"] == 0
     assert summary["session"] is not None
     assert summary["session"]["status"] == "complete_with_rejections"
+    connection = store.connect()
+    try:
+        factor_row = connection.execute(
+            "SELECT report_json FROM factor_screening_runs"
+        ).fetchone()
+    finally:
+        connection.close()
+    factor_report = json.loads(str(factor_row["report_json"]))
+    assert (
+        factor_report["spec"]["frozen_model_version"]
+        == "cex-kline-chainlink-direction-v1+49093373ec3e"
+    )
 
     for index in range(1, 102):
         sample_at = at + timedelta(seconds=index * 5)

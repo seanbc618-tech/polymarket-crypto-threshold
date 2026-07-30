@@ -30,7 +30,9 @@ inputs, duplicate groups, invalid probabilities, or invalid fill ratios fail
 closed. Failed trials remain in the report with explicit reasons.
 
 The current pre-registered grid is created by the independent microstructure
-shadow service:
+shadow service. Its comparison model is pinned to the deployed artifact runtime
+version `cex-kline-chainlink-direction-v1+49093373ec3e`, including the first
+12 characters of the verified artifact hash:
 
 | Rule | Factor | Condition | Side |
 |---|---|---|---|

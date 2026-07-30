@@ -1023,6 +1023,7 @@ def microstructure_shadow(
         stream_ready_timeout_seconds=(
             settings.MICROSTRUCTURE_STREAM_READY_TIMEOUT_SECONDS
         ),
+        frozen_model_version=settings.MICROSTRUCTURE_FROZEN_MODEL_VERSION,
     )
     service = MicrostructureShadowService(
         store=store,

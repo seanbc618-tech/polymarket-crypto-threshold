@@ -68,6 +68,7 @@ class MicrostructureShadowConfig:
     event_batch_limit: int
     integrity_sample_limit: int
     stream_ready_timeout_seconds: float
+    frozen_model_version: str
     warmup_seconds: float = 2.0
 
 
@@ -98,6 +99,7 @@ class MicrostructureShadowService:
             or config.event_batch_limit < 1
             or config.integrity_sample_limit < 102
             or config.stream_ready_timeout_seconds <= 0
+            or not config.frozen_model_version.strip()
             or config.warmup_seconds < 0
         ):
             raise ValueError("invalid microstructure shadow configuration")
@@ -524,7 +526,7 @@ class MicrostructureShadowService:
             minimum_groups_per_asset=4,
             required_assets=("BTC", "ETH", "SOL", "XRP"),
             stake_usdc=Decimal("10"),
-            frozen_model_version="cex-kline-chainlink-direction-v1-frozen",
+            frozen_model_version=self.config.frozen_model_version,
             market_baseline_version="polymarket-executable-midpoint-v1",
             integrity_source_version=RESEARCH_INTEGRITY_SOURCE_VERSION,
             replay_source_version="hft-inspired-l2-replay-r1-v1",

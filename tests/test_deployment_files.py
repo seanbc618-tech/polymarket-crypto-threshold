@@ -192,6 +192,10 @@ def test_microstructure_environment_is_public_only_and_independent() -> None:
     assert "MICROSTRUCTURE_STREAM_READY_TIMEOUT_SECONDS=30" in content
     assert "MICROSTRUCTURE_PURGE_SECONDS=600" in content
     assert "MICROSTRUCTURE_EMBARGO_SECONDS=300" in content
+    assert (
+        "MICROSTRUCTURE_FROZEN_MODEL_VERSION="
+        "cex-kline-chainlink-direction-v1+49093373ec3e" in content
+    )
     assert "BINANCE_STREAM_PROXY_URL=\n" in content
     assert "POLYMARKET_PRIVATE_KEY" not in content
     assert "POLYMARKET_FUNDER" not in content

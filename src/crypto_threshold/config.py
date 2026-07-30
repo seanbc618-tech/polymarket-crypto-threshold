@@ -110,6 +110,9 @@ class Settings(BaseSettings):
         ge=1_000,
         le=2_000_000,
     )
+    MICROSTRUCTURE_FROZEN_MODEL_VERSION: str = (
+        "cex-kline-chainlink-direction-v1+49093373ec3e"
+    )
     MICROSTRUCTURE_DURATION_HOURS: float = Field(default=2.0, gt=0)
 
     DASHBOARD_PUBLIC_ORIGIN: str | None = None
@@ -213,6 +216,24 @@ class Settings(BaseSettings):
     def microstructure_symbols_are_declared_csv(cls, value: object) -> str:
         symbols = _csv_symbols(value, field="MICROSTRUCTURE_SYMBOLS")
         return ",".join(symbols)
+
+    @field_validator("MICROSTRUCTURE_FROZEN_MODEL_VERSION")
+    @classmethod
+    def microstructure_frozen_model_version_is_exact(cls, value: object) -> str:
+        raw = str(value).strip()
+        model_name, separator, digest = raw.rpartition("+")
+        if (
+            separator != "+"
+            or not model_name
+            or len(digest) != 12
+            or digest != digest.lower()
+            or any(character not in "0123456789abcdef" for character in digest)
+        ):
+            raise ValueError(
+                "MICROSTRUCTURE_FROZEN_MODEL_VERSION must end with an exact "
+                "12-character lowercase artifact-hash prefix"
+            )
+        return raw
 
     @property
     def wallet_configured(self) -> bool:

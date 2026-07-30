@@ -55,6 +55,10 @@ def test_stream_defaults_to_disabled_read_only_shadow() -> None:
     assert settings.MICROSTRUCTURE_STREAM_READY_TIMEOUT_SECONDS == 30
     assert settings.MICROSTRUCTURE_PURGE_SECONDS == 600
     assert settings.MICROSTRUCTURE_EMBARGO_SECONDS == 300
+    assert (
+        settings.MICROSTRUCTURE_FROZEN_MODEL_VERSION
+        == "cex-kline-chainlink-direction-v1+49093373ec3e"
+    )
 
 
 def test_binance_stream_proxy_is_explicit_no_auth_origin() -> None:
@@ -107,3 +111,20 @@ def test_microstructure_symbols_are_unique_supported_csv() -> None:
         Settings(_env_file=None, MICROSTRUCTURE_SYMBOLS="BTCUSDT,BTCUSDT")
     with pytest.raises(ValidationError):
         Settings(_env_file=None, MICROSTRUCTURE_SYMBOLS="BTC-USD")
+
+
+def test_microstructure_frozen_model_version_requires_exact_hash_prefix() -> None:
+    with pytest.raises(ValidationError):
+        Settings(
+            _env_file=None,
+            MICROSTRUCTURE_FROZEN_MODEL_VERSION=(
+                "cex-kline-chainlink-direction-v1-frozen"
+            ),
+        )
+    with pytest.raises(ValidationError):
+        Settings(
+            _env_file=None,
+            MICROSTRUCTURE_FROZEN_MODEL_VERSION=(
+                "cex-kline-chainlink-direction-v1+49093373EC3E"
+            ),
+        )
