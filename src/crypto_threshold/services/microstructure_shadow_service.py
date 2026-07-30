@@ -61,6 +61,8 @@ class MicrostructureShadowConfig:
     snapshot_seconds: float
     feature_seconds: float
     integrity_seconds: float
+    purge_seconds: float
+    embargo_seconds: float
     depth_levels: int
     trade_lookback_seconds: float
     event_batch_limit: int
@@ -89,6 +91,8 @@ class MicrostructureShadowService:
             or config.snapshot_seconds <= 0
             or config.feature_seconds <= 0
             or config.integrity_seconds <= 0
+            or config.purge_seconds < 0
+            or config.embargo_seconds < 0
             or config.depth_levels < 1
             or config.trade_lookback_seconds <= 0
             or config.event_batch_limit < 1
@@ -390,52 +394,89 @@ class MicrostructureShadowService:
             session_id=session_id,
             limit=self.config.integrity_sample_limit * len(self.config.symbols),
         )
-        btc_rows = tuple(row for row in rows if str(row["symbol"]) == "BTCUSDT")
-        if len(btc_rows) < 102:
-            reasons.append(f"integrity_collecting:{len(btc_rows)}/102")
-            return 0
-        research_rows = _research_rows(
-            btc_rows[-self.config.integrity_sample_limit :],
-            feature_seconds=self.config.feature_seconds,
-        )
-        created_at = _utc(self.clock())
-        try:
-            report = self._integrity.analyze(
-                research_rows,
-                _causal_feature_builder,
-                feature_builder_version=MICROSTRUCTURE_FACTOR_VERSION,
-                startup_rows=(20, 50, 100),
-                max_timestamp_gap=timedelta(
-                    seconds=self.config.feature_seconds * 3
-                ),
+        completed = 0
+        for symbol in self.config.symbols:
+            symbol_rows = tuple(
+                row for row in rows if str(row["symbol"]) == symbol
             )
-            split = self._integrity.chronological_split(
-                research_rows,
-                train_fraction=0.7,
-                purge=timedelta(minutes=15),
-                embargo=timedelta(minutes=15),
+            if len(symbol_rows) < 102:
+                reasons.append(
+                    f"{symbol}:integrity_collecting:{len(symbol_rows)}/102"
+                )
+                continue
+            research_rows = _research_rows(
+                symbol_rows[-self.config.integrity_sample_limit :],
+                feature_seconds=self.config.feature_seconds,
             )
-            status = "passed" if report.passed else "failed"
-            payload: object = {"analysis": report, "split": split}
-            manifest_hash = _hash(
-                {
-                    "analysis_manifest": report.manifest_hash,
-                    "split_manifest": split.manifest_hash,
+            created_at = _utc(self.clock())
+            try:
+                report = self._integrity.analyze(
+                    research_rows,
+                    _causal_feature_builder,
+                    feature_builder_version=MICROSTRUCTURE_FACTOR_VERSION,
+                    startup_rows=(20, 50, 100),
+                    max_timestamp_gap=timedelta(
+                        seconds=self.config.feature_seconds * 3
+                    ),
+                )
+            except ResearchIntegrityError as exc:
+                reasons.append(f"{symbol}:integrity_failed:{exc}")
+                continue
+
+            split = None
+            split_error: str | None = None
+            try:
+                split = self._integrity.chronological_split(
+                    research_rows,
+                    train_fraction=0.7,
+                    purge=timedelta(seconds=self.config.purge_seconds),
+                    embargo=timedelta(seconds=self.config.embargo_seconds),
+                )
+            except ResearchIntegrityError as exc:
+                split_error = str(exc)
+                reasons.append(f"{symbol}:integrity_split_collecting:{exc}")
+
+            if split is None:
+                status = "failed" if not report.passed else "collecting_split"
+                payload: object = {
+                    "symbol": symbol,
+                    "analysis": report,
+                    "split": None,
+                    "split_error": split_error,
                 }
+                manifest_hash = _hash(
+                    {
+                        "symbol": symbol,
+                        "analysis_manifest": report.manifest_hash,
+                        "split_error": split_error,
+                    }
+                )
+            else:
+                status = "passed" if report.passed else "failed"
+                payload = {
+                    "symbol": symbol,
+                    "analysis": report,
+                    "split": split,
+                    "split_error": None,
+                }
+                manifest_hash = _hash(
+                    {
+                        "symbol": symbol,
+                        "analysis_manifest": report.manifest_hash,
+                        "split_manifest": split.manifest_hash,
+                    }
+                )
+            self.store.save_integrity_run(
+                run_id=f"integrity:{symbol}:{uuid4()}",
+                session_id=session_id,
+                status=status,
+                row_count=len(research_rows),
+                manifest_hash=manifest_hash,
+                report=payload,
+                created_at=created_at,
             )
-        except ResearchIntegrityError as exc:
-            reasons.append(f"integrity_collecting:{exc}")
-            return 0
-        self.store.save_integrity_run(
-            run_id=f"integrity:{uuid4()}",
-            session_id=session_id,
-            status=status,
-            row_count=len(research_rows),
-            manifest_hash=manifest_hash,
-            report=payload,
-            created_at=created_at,
-        )
-        return 1
+            completed += 1
+        return completed
 
     def _predeclare_factor_screen(
         self,

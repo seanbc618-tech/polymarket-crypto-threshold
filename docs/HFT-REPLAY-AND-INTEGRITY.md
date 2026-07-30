@@ -113,6 +113,14 @@ removed. Callers must declare a non-empty feature-builder version, at least two
 startup windows, and a positive maximum timestamp gap; these values are part of
 the sealed manifest.
 
+The shadow runner executes this gate separately for BTC, ETH, SOL, and XRP so
+one asset's history cannot satisfy another asset's startup window. It retains
+the look-ahead/recursive report once 102 rows exist even when the chronological
+split is still collecting. The deployed five-minute research horizon declares
+a 600-second purge and 300-second embargo; a split becomes `passed` only when
+both train and test event-group partitions remain non-empty after those
+exclusions.
+
 ## Acceptance boundary
 
 The current implementation is a core engineering milestone only. The public

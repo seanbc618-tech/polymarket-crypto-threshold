@@ -8,6 +8,7 @@ from pathlib import Path
 
 from crypto_threshold.domain.microstructure import L2Level, TradeAggressor
 from crypto_threshold.domain.microstructure_capture import (
+    MicrostructureFeatureSample,
     PerpetualMark,
     RawMicrostructureEvent,
     RawMicrostructureKind,
@@ -135,6 +136,8 @@ def test_one_cycle_persists_features_and_preregistered_factor_plan(tmp_path: Pat
         snapshot_seconds=60,
         feature_seconds=5,
         integrity_seconds=300,
+        purge_seconds=600,
+        embargo_seconds=300,
         depth_levels=1,
         trade_lookback_seconds=5,
         event_batch_limit=100,
@@ -164,3 +167,41 @@ def test_one_cycle_persists_features_and_preregistered_factor_plan(tmp_path: Pat
     assert summary["integrity_runs"] == 0
     assert summary["session"] is not None
     assert summary["session"]["status"] == "complete_with_rejections"
+
+    for index in range(1, 102):
+        sample_at = at + timedelta(seconds=index * 5)
+        assert store.save_feature_sample(
+            MicrostructureFeatureSample(
+                sample_id=f"feature:integrity:{index}",
+                session_id=session_id,
+                symbol="BTCUSDT",
+                as_of_exchange_at=sample_at,
+                as_of_received_at=sample_at + timedelta(milliseconds=2),
+                best_bid=Decimal("100"),
+                best_ask=Decimal("101"),
+                midpoint=Decimal("100.5"),
+                spread=Decimal("1"),
+                bid_depth=Decimal("2"),
+                ask_depth=Decimal("2"),
+                book_imbalance=Decimal("0"),
+                microprice=Decimal("100.5"),
+                vamp=Decimal("100.5"),
+                aggressive_trade_imbalance=Decimal("0"),
+                feed_latency_ms=Decimal("2"),
+                spot_perpetual_basis_bps=Decimal("0"),
+                btc_lead_correlation=None,
+                source_event_ids=(1, 2),
+                source_payload_hashes=("5" * 64,),
+            )
+        )
+    reasons: list[str] = []
+    assert service._run_integrity(session_id, reasons=reasons) == 1
+    assert any("integrity_split_collecting" in reason for reason in reasons)
+    connection = store.connect()
+    try:
+        row = connection.execute(
+            "SELECT status, row_count FROM research_integrity_runs"
+        ).fetchone()
+    finally:
+        connection.close()
+    assert tuple(row) == ("collecting_split", 102)

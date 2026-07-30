@@ -93,6 +93,8 @@ class Settings(BaseSettings):
     MICROSTRUCTURE_SNAPSHOT_SECONDS: float = Field(default=60.0, gt=0)
     MICROSTRUCTURE_FEATURE_SECONDS: float = Field(default=5.0, gt=0)
     MICROSTRUCTURE_INTEGRITY_SECONDS: float = Field(default=300.0, gt=0)
+    MICROSTRUCTURE_PURGE_SECONDS: float = Field(default=600.0, ge=0)
+    MICROSTRUCTURE_EMBARGO_SECONDS: float = Field(default=300.0, ge=0)
     MICROSTRUCTURE_DEPTH_LEVELS: int = Field(default=5, ge=1, le=100)
     MICROSTRUCTURE_TRADE_LOOKBACK_SECONDS: float = Field(default=5.0, gt=0)
     MICROSTRUCTURE_EVENT_BATCH_LIMIT: int = Field(default=50_000, ge=1, le=200_000)

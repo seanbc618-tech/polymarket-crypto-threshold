@@ -1014,6 +1014,8 @@ def microstructure_shadow(
         snapshot_seconds=settings.MICROSTRUCTURE_SNAPSHOT_SECONDS,
         feature_seconds=settings.MICROSTRUCTURE_FEATURE_SECONDS,
         integrity_seconds=settings.MICROSTRUCTURE_INTEGRITY_SECONDS,
+        purge_seconds=settings.MICROSTRUCTURE_PURGE_SECONDS,
+        embargo_seconds=settings.MICROSTRUCTURE_EMBARGO_SECONDS,
         depth_levels=settings.MICROSTRUCTURE_DEPTH_LEVELS,
         trade_lookback_seconds=settings.MICROSTRUCTURE_TRADE_LOOKBACK_SECONDS,
         event_batch_limit=settings.MICROSTRUCTURE_EVENT_BATCH_LIMIT,

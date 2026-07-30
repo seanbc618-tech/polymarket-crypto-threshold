@@ -53,6 +53,8 @@ def test_stream_defaults_to_disabled_read_only_shadow() -> None:
     assert settings.MICROSTRUCTURE_DEPTH_LEVELS == 5
     assert settings.MICROSTRUCTURE_INTEGRITY_SAMPLE_LIMIT == 500
     assert settings.MICROSTRUCTURE_STREAM_READY_TIMEOUT_SECONDS == 30
+    assert settings.MICROSTRUCTURE_PURGE_SECONDS == 600
+    assert settings.MICROSTRUCTURE_EMBARGO_SECONDS == 300
 
 
 def test_binance_stream_proxy_is_explicit_no_auth_origin() -> None:
