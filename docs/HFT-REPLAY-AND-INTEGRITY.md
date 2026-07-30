@@ -125,6 +125,12 @@ a 600-second purge and 300-second embargo; a split becomes `passed` only when
 both train and test event-group partitions remain non-empty after those
 exclusions.
 
+Raw Level-2 updates and trades remain continuously persisted. The deployed VPS
+derives feature rows every 10 seconds, with a fail-closed 30-second maximum gap.
+This cadence was declared after a preserved five-second-cadence session exposed
+one approximately 20-second derived-feature gap under peak tape-rebuild load;
+the gap was retained as an R2 failure instead of being relabeled or deleted.
+
 ## Acceptance boundary
 
 The current implementation is a core engineering milestone only. The public

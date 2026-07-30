@@ -189,6 +189,7 @@ def test_microstructure_environment_is_public_only_and_independent() -> None:
     assert "MICROSTRUCTURE_SYMBOLS=BTCUSDT,ETHUSDT,SOLUSDT,XRPUSDT" in content
     assert "TRADING_DISABLED=true" in content
     assert "BINANCE_FUTURES_API_BASE=https://fapi.binance.com/fapi/v1" in content
+    assert "MICROSTRUCTURE_FEATURE_SECONDS=10" in content
     assert "MICROSTRUCTURE_STREAM_READY_TIMEOUT_SECONDS=30" in content
     assert "MICROSTRUCTURE_PURGE_SECONDS=600" in content
     assert "MICROSTRUCTURE_EMBARGO_SECONDS=300" in content

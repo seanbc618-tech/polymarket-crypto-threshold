@@ -91,7 +91,7 @@ class Settings(BaseSettings):
     MICROSTRUCTURE_SYMBOLS: str = "BTCUSDT,ETHUSDT,SOLUSDT,XRPUSDT"
     MICROSTRUCTURE_POLL_SECONDS: float = Field(default=0.25, gt=0)
     MICROSTRUCTURE_SNAPSHOT_SECONDS: float = Field(default=60.0, gt=0)
-    MICROSTRUCTURE_FEATURE_SECONDS: float = Field(default=5.0, gt=0)
+    MICROSTRUCTURE_FEATURE_SECONDS: float = Field(default=10.0, gt=0)
     MICROSTRUCTURE_INTEGRITY_SECONDS: float = Field(default=300.0, gt=0)
     MICROSTRUCTURE_PURGE_SECONDS: float = Field(default=600.0, ge=0)
     MICROSTRUCTURE_EMBARGO_SECONDS: float = Field(default=300.0, ge=0)
