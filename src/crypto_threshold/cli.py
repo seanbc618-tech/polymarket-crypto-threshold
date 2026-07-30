@@ -42,6 +42,7 @@ from crypto_threshold.services.cex_direction_service import (
     CexDirectionTrainingService,
 )
 from crypto_threshold.services.discovery_service import DiscoveryService
+from crypto_threshold.services.hft_replay_service import HFT_REPLAY_SOURCE_VERSION
 from crypto_threshold.services.market_workflow_service import MarketWorkflowService
 from crypto_threshold.services.nautilus_execution_blueprint import (
     NautilusExecutionBlueprint,
@@ -50,6 +51,9 @@ from crypto_threshold.services.paper_ledger_service import PaperLedgerService
 from crypto_threshold.services.phase2_acceptance_service import Phase2AcceptanceService
 from crypto_threshold.services.pricing_service import cross_check_prices
 from crypto_threshold.services.replay_service import ReplayService
+from crypto_threshold.services.research_integrity_service import (
+    RESEARCH_INTEGRITY_SOURCE_VERSION,
+)
 from crypto_threshold.services.settlement_service import SettlementService
 from crypto_threshold.services.shadow_monitor_service import ShadowMonitorService
 from crypto_threshold.services.short_challenger_service import ShortChallengerService
@@ -906,6 +910,31 @@ def execution_blueprint() -> None:
     )
     console.print(
         "  mutation lock: submit/cancel/authenticated reconciliation not implemented"
+    )
+
+
+@app.command("research-tooling-status")
+def research_tooling_status() -> None:
+    """Show the implemented R1/R2 core and its still-blocked evidence gates."""
+    console.print("R1 evidence: REAL L2 TAPES PENDING")
+    console.print("R2 evidence: SEALED CANDIDATE RUN PENDING")
+    table = Table("Work package", "Core", "Evidence status", "Source version")
+    table.add_row(
+        "R1 HFT replay",
+        "L2 + feed/order latency + queue/fill grid + attribution",
+        "REAL L2 TAPES PENDING",
+        HFT_REPLAY_SOURCE_VERSION,
+    )
+    table.add_row(
+        "R2 integrity",
+        "lookahead + recursive + timestamps + purge/embargo",
+        "SEALED CANDIDATE RUN PENDING",
+        RESEARCH_INTEGRITY_SOURCE_VERSION,
+    )
+    console.print(table)
+    console.print(
+        "[yellow]LIVE NO-GO[/] submission=false signing=false "
+        "authenticated_reconciliation=false"
     )
 
 

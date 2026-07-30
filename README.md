@@ -90,6 +90,7 @@ uv run crypto-threshold replay-build --name <combined> --training-dataset <train
 uv run crypto-threshold replay-verify --dataset <combined>
 uv run crypto-threshold calibrate --dataset <combined>
 uv run crypto-threshold execution-blueprint
+uv run crypto-threshold research-tooling-status
 ```
 
 `analyze` accepts a real Gamma market ID or condition ID. It does not accept an
@@ -187,7 +188,9 @@ git diff --check
 
 See [PROJECT-STATUS.md](docs/PROJECT-STATUS.md) for current evidence, safety
 boundaries, and remaining risks. The future execution contract is documented in
-[NAUTILUS-EXECUTION-BLUEPRINT.md](docs/NAUTILUS-EXECUTION-BLUEPRINT.md).
+[NAUTILUS-EXECUTION-BLUEPRINT.md](docs/NAUTILUS-EXECUTION-BLUEPRINT.md). The
+offline Level-2 replay and anti-leakage gates are documented in
+[HFT-REPLAY-AND-INTEGRITY.md](docs/HFT-REPLAY-AND-INTEGRITY.md).
 
 ## License
 

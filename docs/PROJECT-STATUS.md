@@ -928,7 +928,7 @@ accounting only and is not a profitability claim.
 
 #### R1 — HFTBacktest-inspired microstructure and execution replay
 
-**Status:** **PLANNED — depends on R0 data**
+**Status:** **CORE IMPLEMENTED — REAL L2 TAPES AND FORWARD EVIDENCE PENDING**
 
 Use the HFTBacktest design as the reference for tick-by-tick replay, feed and
 order latency, order-book depth, queue position, and fill-model sensitivity.
@@ -944,9 +944,28 @@ latency assumption and does not depend on an optimistic queue model. It must
 also explain which part of any profit comes from prediction, spread capture,
 rebates, or residual directional inventory.
 
+The first dependency-light R1 core now lives in
+`domain/microstructure.py` and `services/hft_replay_service.py`. It reconstructs
+ordered Level-2 snapshots/depth/trades with separate exchange and local receipt
+times; applies order-entry and response latency; walks taker depth; models
+risk-averse, identity-probability, and square-probability queue positions; and
+compares all-or-nothing with partial fills. Marked results are decomposed into
+spread capture, directional inventory, and fees. A deterministic sensitivity
+manifest identifies results which exist only under a less conservative queue
+or fill assumption. The same service extracts top-N imbalance, microprice,
+aggressive-trade imbalance, spread, and feed latency.
+
+This does not make R1 accepted. The project has not yet sealed real
+tick/L2 tapes across independent assets and dates, calibrated a queue model
+against observed paper/live acknowledgements, or shown positive executable
+edge under the conservative grid. Spot-perpetual basis and cross-venue
+lead/lag also require synchronized multi-venue tapes. Exact contracts and the
+remaining acceptance boundary are recorded in
+`docs/HFT-REPLAY-AND-INTEGRITY.md`.
+
 #### R2 — Freqtrade-inspired research-integrity gates
 
-**Status:** **PLANNED — required before factor promotion**
+**Status:** **CORE GATES IMPLEMENTED — SEALED CANDIDATE RUN PENDING**
 
 Add explicit automated checks for look-ahead bias, recursive/rolling-feature
 contamination, timestamp gaps, future payloads, and accidental reuse of
@@ -956,6 +975,21 @@ behavior mechanically separate from any authenticated execution surface.
 
 R2 passes only with zero detected future-input violations and a reproducible
 sealed manifest. A green unit-test run alone is not an R2 pass.
+
+The first R2 core now lives in `domain/research_integrity.py` and
+`services/research_integrity_service.py`. It audits source observation and
+receipt times, forbids target-only inputs, compares full-history features with
+every chronological prefix, measures final-row drift across declared startup
+windows, detects timestamp gaps and malformed feature output, and produces an
+event-grouped chronological split with explicit purge and embargo intervals.
+Inputs, computed results, violations, and split membership receive
+deterministic manifest hashes.
+
+The gates have adversarial tests for future-frame means, recursive indicator
+drift, late payload receipt, target leakage, non-monotonic rows, timestamp
+gaps, and overlapping groups. R2 remains unaccepted until these gates are run
+against the exact sealed challenger dataset/feature builder with reviewed
+tolerances and zero unexplained violations.
 
 #### R3 — VectorBT-inspired offline factor screening
 

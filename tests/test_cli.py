@@ -22,6 +22,7 @@ def test_help_and_analyze_contract() -> None:
     replay_plan = runner.invoke(app, ["replay-plan", "--help"])
     challenger_status = runner.invoke(app, ["short-challenger-status", "--help"])
     execution_blueprint = runner.invoke(app, ["execution-blueprint", "--help"])
+    research_tooling = runner.invoke(app, ["research-tooling-status", "--help"])
     assert root.exit_code == 0
     assert analyze.exit_code == 0
     assert dashboard.exit_code == 0
@@ -30,6 +31,7 @@ def test_help_and_analyze_contract() -> None:
     assert replay_plan.exit_code == 0
     assert challenger_status.exit_code == 0
     assert execution_blueprint.exit_code == 0
+    assert research_tooling.exit_code == 0
     assert "--market" in analyze.output
     assert "market-prob" not in analyze.output
     assert "read-only research dashboard" in dashboard.output
@@ -38,6 +40,7 @@ def test_help_and_analyze_contract() -> None:
     assert "--training-label-count" in replay_plan.output
     assert "--db" in challenger_status.output
     assert "non-executable" in execution_blueprint.output
+    assert "R1/R2" in research_tooling.output
 
 
 def test_execution_blueprint_cli_is_pinned_and_non_executable() -> None:
@@ -49,6 +52,17 @@ def test_execution_blueprint_cli_is_pinned_and_non_executable() -> None:
     assert "FAK" in result.output
     assert "live_submission=false" in result.output
     assert "submit/cancel/authenticated reconciliation not implemented" in result.output
+
+
+def test_research_tooling_cli_reports_core_without_claiming_acceptance() -> None:
+    result = runner.invoke(app, ["research-tooling-status"])
+    assert result.exit_code == 0
+    assert "R1 HFT replay" in result.output
+    assert "REAL L2 TAPES PENDING" in result.output
+    assert "R2 integrity" in result.output
+    assert "SEALED CANDIDATE RUN PENDING" in result.output
+    assert "LIVE NO-GO" in result.output
+    assert "submission=false" in result.output
 
 
 def test_init_db_creates_read_only_schema(tmp_path: Path) -> None:
