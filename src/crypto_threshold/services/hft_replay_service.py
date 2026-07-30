@@ -376,6 +376,9 @@ class HftReplayService:
         )
 
         as_of = selected[-1]
+        decision_received_at = max(
+            _utc(event.received_at) for event in selected
+        )
         trade_start = _utc(as_of.exchange_at) - trade_lookback
         buy_volume = _ZERO
         sell_volume = _ZERO
@@ -408,7 +411,7 @@ class HftReplayService:
         return L2MicrostructureFeatures(
             instrument_id=as_of.instrument_id,
             as_of_exchange_at=_utc(as_of.exchange_at),
-            as_of_received_at=_utc(as_of.received_at),
+            as_of_received_at=decision_received_at,
             best_bid=bid,
             best_ask=ask,
             midpoint=midpoint,

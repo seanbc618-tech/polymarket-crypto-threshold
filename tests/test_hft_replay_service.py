@@ -404,6 +404,22 @@ def test_feature_extraction_records_l2_and_aggressive_trade_imbalance() -> None:
     assert features.feed_latency_ms == Decimal("50.0")
     assert features.source_event_ids == ("snapshot", "trade-2", "trade-3", "as-of")
 
+    delayed = (
+        events[0],
+        replace(
+            events[1],
+            received_at=BASE + timedelta(milliseconds=400),
+        ),
+        *events[2:],
+    )
+    delayed_features = HftReplayService().extract_features(
+        delayed,
+        as_of_event_id="as-of",
+        depth_levels=1,
+        trade_lookback=timedelta(seconds=1),
+    )
+    assert delayed_features.as_of_received_at == BASE + timedelta(milliseconds=400)
+
 
 def test_invalid_tapes_and_unreceived_decision_inputs_fail_closed() -> None:
     snapshot = _snapshot()

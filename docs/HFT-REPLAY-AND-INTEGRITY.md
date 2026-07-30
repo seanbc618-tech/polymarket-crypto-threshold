@@ -72,6 +72,10 @@ source version and SHA-256 payload hash; receipt time cannot precede exchange
 time; and an order cannot cite a decision event that was not yet received
 locally. Each replay order also carries the exact strategy version.
 
+Receipt times may arrive out of exchange order. A derived feature's decision
+timestamp is therefore the maximum receipt time across every raw event in its
+tape prefix, not merely the receipt time of the final exchange-ordered event.
+
 ## R2: Freqtrade-inspired anti-cheating gates
 
 Reference semantics:
