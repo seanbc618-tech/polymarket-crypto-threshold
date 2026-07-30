@@ -155,6 +155,7 @@ class BinanceMicrostructureStream:
         self._status = "disabled"
         self._generation = 0
         self._dropped = 0
+        self._observed_symbols: set[str] = set()
         self._last_error: str | None = None
         self._last_event_monotonic: float | None = None
 
@@ -163,6 +164,7 @@ class BinanceMicrostructureStream:
             if self._thread is not None and self._thread.is_alive():
                 return
             self._stop.clear()
+            self._observed_symbols.clear()
             self._status = "starting"
             self._thread = threading.Thread(
                 target=self._thread_main,
@@ -206,6 +208,7 @@ class BinanceMicrostructureStream:
                     "queued": len(self._events),
                     "dropped": self._dropped,
                     "generation": self._generation,
+                    "observed_symbols": sorted(self._observed_symbols),
                     "source_version": BINANCE_MICROSTRUCTURE_SOURCE_VERSION,
                     "proxy_enabled": self._proxy is not None,
                     "last_error": self._last_error,
@@ -233,6 +236,7 @@ class BinanceMicrostructureStream:
             handles: list[Any] = []
             with self._lock:
                 self._last_event_monotonic = None
+                self._observed_symbols.clear()
             self._set_health("connecting")
             try:
                 connection = await self._create_connection()
@@ -325,6 +329,7 @@ class BinanceMicrostructureStream:
             self._last_event_monotonic = time.monotonic()
             if event.symbol not in self._symbols:
                 return
+            self._observed_symbols.add(event.symbol)
             if len(self._events) >= self._max_events:
                 self._events.popleft()
                 self._dropped += 1

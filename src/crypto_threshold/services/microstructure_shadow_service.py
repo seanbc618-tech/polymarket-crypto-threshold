@@ -65,6 +65,7 @@ class MicrostructureShadowConfig:
     trade_lookback_seconds: float
     event_batch_limit: int
     integrity_sample_limit: int
+    stream_ready_timeout_seconds: float
     warmup_seconds: float = 2.0
 
 
@@ -92,6 +93,7 @@ class MicrostructureShadowService:
             or config.trade_lookback_seconds <= 0
             or config.event_batch_limit < 1
             or config.integrity_sample_limit < 102
+            or config.stream_ready_timeout_seconds <= 0
             or config.warmup_seconds < 0
         ):
             raise ValueError("invalid microstructure shadow configuration")
@@ -106,6 +108,7 @@ class MicrostructureShadowService:
         self._last_feature = float("-inf")
         self._last_integrity = float("-inf")
         self._last_dropped = 0
+        self._last_generation = 0
         self._tapes = BinanceTapeService()
         self._replay = HftReplayService()
         self._integrity = ResearchIntegrityService()
@@ -137,6 +140,7 @@ class MicrostructureShadowService:
         status = "complete"
         self.stream.start()
         try:
+            self._wait_for_stream_ready()
             if self.config.warmup_seconds:
                 self.sleeper(self.config.warmup_seconds)
             while True:
@@ -174,6 +178,33 @@ class MicrostructureShadowService:
             )
         return session_id
 
+    def _wait_for_stream_ready(self) -> None:
+        deadline = self.monotonic() + self.config.stream_ready_timeout_seconds
+        required = set(self.config.symbols)
+        while True:
+            health = self.stream.health()
+            status = str(health.get("status") or "")
+            detail = health.get("detail")
+            observed = (
+                {
+                    str(symbol)
+                    for symbol in detail.get("observed_symbols", ())
+                }
+                if isinstance(detail, dict)
+                else set()
+            )
+            if status in {"connected", "overflow"} and required <= observed:
+                return
+            if status == "failed":
+                raise RuntimeError("microstructure_stream_failed_before_ready")
+            remaining = deadline - self.monotonic()
+            if remaining <= 0:
+                missing = ",".join(sorted(required - observed))
+                raise TimeoutError(
+                    f"microstructure_stream_ready_timeout:missing={missing}"
+                )
+            self.sleeper(min(0.1, remaining))
+
     def cycle(self, session_id: str) -> MicrostructureCycleResult:
         started_at = _utc(self.clock())
         now_monotonic = self.monotonic()
@@ -190,9 +221,52 @@ class MicrostructureShadowService:
             if isinstance(detail, dict)
             else 0
         )
+        generation = (
+            int(detail.get("generation", 0))
+            if isinstance(detail, dict)
+            else 0
+        )
+        observed_symbols = (
+            {
+                str(symbol)
+                for symbol in detail.get("observed_symbols", ())
+            }
+            if isinstance(detail, dict)
+            else set()
+        )
+        stream_status = str(health.get("status") or "")
+        required_symbols = set(self.config.symbols)
+        if (
+            stream_status not in {"connected", "overflow"}
+            or not required_symbols <= observed_symbols
+        ):
+            missing = ",".join(sorted(required_symbols - observed_symbols))
+            reasons.append(
+                f"stream_not_ready:{stream_status}:missing={missing}"
+            )
+            return MicrostructureCycleResult(
+                session_id=session_id,
+                persisted_events=0,
+                persisted_snapshots=0,
+                persisted_marks=0,
+                feature_samples=0,
+                integrity_runs=0,
+                factor_runs=0,
+                status="complete_with_rejections",
+                reasons=tuple(reasons),
+                started_at=started_at,
+                completed_at=_utc(self.clock()),
+            )
+        generation_changed = generation != self._last_generation
+        if self._last_generation and generation_changed:
+            reasons.append(
+                f"stream_reconnect_resnapshot:{self._last_generation}->{generation}"
+            )
+        self._last_generation = generation
         snapshot_due = (
             now_monotonic - self._last_snapshot >= self.config.snapshot_seconds
             or dropped > self._last_dropped
+            or generation_changed
         )
         if dropped > self._last_dropped:
             reasons.append(

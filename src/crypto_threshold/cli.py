@@ -1018,6 +1018,9 @@ def microstructure_shadow(
         trade_lookback_seconds=settings.MICROSTRUCTURE_TRADE_LOOKBACK_SECONDS,
         event_batch_limit=settings.MICROSTRUCTURE_EVENT_BATCH_LIMIT,
         integrity_sample_limit=settings.MICROSTRUCTURE_INTEGRITY_SAMPLE_LIMIT,
+        stream_ready_timeout_seconds=(
+            settings.MICROSTRUCTURE_STREAM_READY_TIMEOUT_SECONDS
+        ),
     )
     service = MicrostructureShadowService(
         store=store,

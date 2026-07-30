@@ -32,7 +32,14 @@ class _Stream:
         self.stopped = True
 
     def health(self) -> dict[str, object]:
-        return {"status": "connected", "detail": {"dropped": 0}}
+        return {
+            "status": "connected",
+            "detail": {
+                "dropped": 0,
+                "generation": 1,
+                "observed_symbols": ["BTCUSDT"],
+            },
+        }
 
     def drain(self, *, limit: int) -> tuple[RawMicrostructureEvent, ...]:
         result = tuple(self.events[:limit])
@@ -132,6 +139,7 @@ def test_one_cycle_persists_features_and_preregistered_factor_plan(tmp_path: Pat
         trade_lookback_seconds=5,
         event_batch_limit=100,
         integrity_sample_limit=102,
+        stream_ready_timeout_seconds=1,
         warmup_seconds=0,
     )
     service = MicrostructureShadowService(

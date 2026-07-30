@@ -7,6 +7,7 @@ from decimal import Decimal
 
 from crypto_threshold.adapters.prices.binance_microstructure import (
     BinanceMicrostructureRestClient,
+    BinanceMicrostructureStream,
     normalize_binance_agg_trade,
     normalize_binance_depth,
 )
@@ -139,3 +140,26 @@ def test_rest_client_rejects_crossed_snapshot() -> None:
         assert "crossed" in str(exc)
     else:
         raise AssertionError("crossed snapshot was accepted")
+
+
+def test_stream_health_reports_each_symbol_observed_before_snapshot() -> None:
+    received = datetime(2026, 7, 30, 5, 0, 0, 1000, tzinfo=UTC)
+    stream = BinanceMicrostructureStream(
+        symbols=("BTCUSDT", "ETHUSDT"),
+        max_events=1_000,
+        clock=lambda: received,
+    )
+    stream._on_depth(  # noqa: SLF001 - callback contract is the behavior under test
+        {
+            "e": "depthUpdate",
+            "E": 1_700_000_000_000,
+            "s": "BTCUSDT",
+            "U": 101,
+            "u": 101,
+            "b": [["100", "1"]],
+            "a": [["101", "1"]],
+        }
+    )
+    detail = stream.health()["detail"]
+    assert isinstance(detail, dict)
+    assert detail["observed_symbols"] == ["BTCUSDT"]

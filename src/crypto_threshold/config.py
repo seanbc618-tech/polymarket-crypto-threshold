@@ -102,6 +102,7 @@ class Settings(BaseSettings):
         le=10_000,
     )
     MICROSTRUCTURE_STREAM_STALE_SECONDS: float = Field(default=30.0, gt=0)
+    MICROSTRUCTURE_STREAM_READY_TIMEOUT_SECONDS: float = Field(default=30.0, gt=0)
     MICROSTRUCTURE_STREAM_MAX_EVENTS: int = Field(
         default=200_000,
         ge=1_000,

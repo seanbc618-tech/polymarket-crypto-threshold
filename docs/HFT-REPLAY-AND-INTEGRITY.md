@@ -120,6 +120,11 @@ capture path is `BinanceMicrostructureStream` plus
 `BinanceMicrostructureRestClient`, and its SQLite store is intentionally
 separate from both existing Polymarket shadow databases.
 
+The collector does not fetch a REST snapshot until every configured symbol has
+produced at least one buffered WebSocket event. A reconnect clears that
+per-generation readiness set and forces a new snapshot bridge. Missing update
+IDs are retained as an explicit rejection; they are never interpolated.
+
 R1 is not accepted as strategy evidence until real L2/trade tapes can be
 replayed, the same candidate remains viable across at least two latency and
 fill assumptions, and its marked edge does not depend on an optimistic queue
