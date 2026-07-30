@@ -354,6 +354,26 @@ class HftReplayService:
         midpoint = (bid + ask) / Decimal("2")
         imbalance = (bid_depth - ask_depth) / total_depth
         microprice = (ask * bid_depth + bid * ask_depth) / total_depth
+        paired_levels = tuple(zip(bid_levels, ask_levels, strict=False))
+        vamp_denominator = sum(
+            (
+                bid_quantity + ask_quantity
+                for (_, bid_quantity), (_, ask_quantity) in paired_levels
+            ),
+            _ZERO,
+        )
+        if vamp_denominator <= 0:
+            raise MicrostructureReplayError("feature_extraction_requires_vamp_depth")
+        vamp = (
+            sum(
+                (
+                    ask_price * bid_quantity + bid_price * ask_quantity
+                    for (bid_price, bid_quantity), (ask_price, ask_quantity) in paired_levels
+                ),
+                _ZERO,
+            )
+            / vamp_denominator
+        )
 
         as_of = selected[-1]
         trade_start = _utc(as_of.exchange_at) - trade_lookback
@@ -397,6 +417,7 @@ class HftReplayService:
             ask_depth=ask_depth,
             book_imbalance=imbalance,
             microprice=microprice,
+            vamp=vamp,
             aggressive_trade_imbalance=trade_imbalance,
             feed_latency_ms=feed_latency_ms,
             source_event_ids=tuple(event.event_id for event in selected),

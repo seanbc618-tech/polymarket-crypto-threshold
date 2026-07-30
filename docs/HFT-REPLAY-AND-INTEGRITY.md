@@ -18,7 +18,7 @@ Reference semantics:
 - [latency models](https://hftbacktest.readthedocs.io/en/latest/latency_models.html)
 - [order fill and queue models](https://hftbacktest.readthedocs.io/en/latest/order_fill.html)
 
-The local implementation is
+The local replay implementation is
 `crypto_threshold.services.hft_replay_service.HftReplayService`. Its event
 contract preserves:
 
@@ -40,10 +40,12 @@ sensitivity cases, not permission to choose whichever simulation looks best.
 Insufficient market depth fails closed under the all-or-nothing model instead
 of inventing liquidity.
 
-The feature extractor records top-N depth imbalance, microprice, recent
-aggressive-trade imbalance, spread, and observed feed latency. Spot/perpetual
-basis and cross-venue lead/lag require synchronized multi-venue tapes and are
-not fabricated from a single Binance book.
+The feature extractor records top-N depth imbalance, microprice, VAMP, recent
+aggressive-trade imbalance, spread, and observed feed latency. The independent
+`microstructure-shadow` collector additionally records a Binance USD-M
+mark/index basis and a bucketed BTC-to-altcoin lead correlation when enough
+synchronized samples exist. Missing synchronized data is stored as `NULL`,
+never imputed as an edge.
 
 Example:
 
@@ -99,6 +101,9 @@ It performs:
 6. **Deterministic sealing.** Inputs, settings, computed baseline, violations,
    recursive variances, and split membership are hashed into reproducible
    manifests.
+7. **Dry-run isolation.** Trading-disabled state, credential absence,
+   authenticated-channel disablement, and mutation-surface absence are checked
+   explicitly and sealed in a separate isolation manifest.
 
 Feature builders receive an immutable tuple of chronological `ResearchRow`
 objects and must return one `FeatureVector` for every row in the same order.
@@ -110,11 +115,15 @@ the sealed manifest.
 
 ## Acceptance boundary
 
-The current implementation is a core engineering milestone only.
+The current implementation is a core engineering milestone only. The public
+capture path is `BinanceMicrostructureStream` plus
+`BinanceMicrostructureRestClient`, and its SQLite store is intentionally
+separate from both existing Polymarket shadow databases.
 
-R1 is not accepted until real L2/trade tapes can be replayed, the same candidate
-remains viable across at least two latency and fill assumptions, and its marked
-edge does not depend on an optimistic queue model.
+R1 is not accepted as strategy evidence until real L2/trade tapes can be
+replayed, the same candidate remains viable across at least two latency and
+fill assumptions, and its marked edge does not depend on an optimistic queue
+model. The collector being deployed only establishes an auditable data path.
 
 R2 is not accepted until the exact candidate dataset and feature builder
 produce:

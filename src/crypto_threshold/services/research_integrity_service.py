@@ -14,6 +14,7 @@ from typing import Any, cast
 
 from crypto_threshold.domain.research_integrity import (
     ChronologicalSplit,
+    DryRunIsolationReport,
     FeatureVector,
     IntegrityViolation,
     IntegrityViolationKind,
@@ -42,6 +43,43 @@ class _EventGroup:
 
 class ResearchIntegrityService:
     """Falsify future-aware or startup-window-dependent feature calculations."""
+
+    def dry_run_isolation(
+        self,
+        *,
+        trading_disabled: bool,
+        credentials_present: bool,
+        authenticated_channel_enabled: bool,
+        mutation_surface_enabled: bool,
+    ) -> DryRunIsolationReport:
+        """Seal the runtime isolation facts instead of treating dry-run as a label."""
+
+        reasons: list[str] = []
+        if not trading_disabled:
+            reasons.append("trading_not_disabled")
+        if credentials_present:
+            reasons.append("credentials_present")
+        if authenticated_channel_enabled:
+            reasons.append("authenticated_channel_enabled")
+        if mutation_surface_enabled:
+            reasons.append("mutation_surface_enabled")
+        payload = {
+            "source_version": "freqtrade-inspired-dry-run-isolation-r2-v1",
+            "trading_disabled": trading_disabled,
+            "credentials_absent": not credentials_present,
+            "authenticated_channel_disabled": not authenticated_channel_enabled,
+            "mutation_surface_absent": not mutation_surface_enabled,
+            "reasons": tuple(reasons),
+        }
+        return DryRunIsolationReport(
+            trading_disabled=trading_disabled,
+            credentials_absent=not credentials_present,
+            authenticated_channel_disabled=not authenticated_channel_enabled,
+            mutation_surface_absent=not mutation_surface_enabled,
+            passed=not reasons,
+            reasons=tuple(reasons),
+            manifest_hash=_hash(payload),
+        )
 
     def analyze(
         self,

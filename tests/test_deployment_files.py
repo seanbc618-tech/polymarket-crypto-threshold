@@ -27,6 +27,18 @@ FORWARD_SHADOW_UNIT = (
 FORWARD_BACKUP_UNIT = (
     ROOT / "deploy" / "systemd" / "crypto-threshold-forward-backup.service"
 )
+MICROSTRUCTURE_ENV_TEMPLATE = (
+    ROOT / "deploy" / "env" / "hk-microstructure-shadow.example.env"
+)
+MICROSTRUCTURE_SHADOW_UNIT = (
+    ROOT / "deploy" / "systemd" / "crypto-threshold-microstructure-shadow.service"
+)
+MICROSTRUCTURE_BACKUP_UNIT = (
+    ROOT / "deploy" / "systemd" / "crypto-threshold-microstructure-backup.service"
+)
+MICROSTRUCTURE_BACKUP_TIMER = (
+    ROOT / "deploy" / "systemd" / "crypto-threshold-microstructure-backup.timer"
+)
 
 
 def test_vps_environment_is_read_only_direct_connect() -> None:
@@ -164,3 +176,43 @@ def test_forward_backup_is_separate_and_retains_three_copies() -> None:
     assert "--output-dir /opt/polymarket-crypto-threshold/backups/forward" in content
     assert "--retention 3" in content
     assert "RestrictAddressFamilies=AF_UNIX" in content
+
+
+def test_microstructure_environment_is_public_only_and_independent() -> None:
+    content = MICROSTRUCTURE_ENV_TEMPLATE.read_text()
+
+    assert "MICROSTRUCTURE_ENABLED=true" in content
+    assert (
+        "MICROSTRUCTURE_DATABASE_PATH=/opt/polymarket-crypto-threshold/data/"
+        "microstructure-shadow.db" in content
+    )
+    assert "MICROSTRUCTURE_SYMBOLS=BTCUSDT,ETHUSDT,SOLUSDT,XRPUSDT" in content
+    assert "TRADING_DISABLED=true" in content
+    assert "BINANCE_FUTURES_API_BASE=https://fapi.binance.com/fapi/v1" in content
+    assert "BINANCE_STREAM_PROXY_URL=\n" in content
+    assert "POLYMARKET_PRIVATE_KEY" not in content
+    assert "POLYMARKET_FUNDER" not in content
+
+
+def test_microstructure_unit_is_bounded_and_does_not_touch_existing_units() -> None:
+    content = MICROSTRUCTURE_SHADOW_UNIT.read_text()
+
+    assert "EnvironmentFile=/etc/polymarket-crypto-microstructure.env" in content
+    assert "microstructure-shadow --duration-hours 2" in content
+    assert "crypto-threshold-forward-shadow.service" not in content
+    assert "crypto-threshold-updown-shadow.service" not in content
+    assert "UnsetEnvironment=" in content
+    assert "POLYMARKET_PRIVATE_KEY" in content
+    assert "ProtectSystem=strict" in content
+    assert "NoNewPrivileges=true" in content
+
+
+def test_microstructure_backup_is_separate_and_timed() -> None:
+    content = MICROSTRUCTURE_BACKUP_UNIT.read_text()
+    timer = MICROSTRUCTURE_BACKUP_TIMER.read_text()
+
+    assert "--database /opt/polymarket-crypto-threshold/data/microstructure-shadow.db" in content
+    assert "--output-dir /opt/polymarket-crypto-threshold/backups/microstructure" in content
+    assert "--retention 3" in content
+    assert "RestrictAddressFamilies=AF_UNIX" in content
+    assert "OnUnitActiveSec=30min" in timer

@@ -399,6 +399,7 @@ def test_feature_extraction_records_l2_and_aggressive_trade_imbalance() -> None:
     assert features.microprice == (
         Decimal("101") * Decimal("9") + Decimal("99") * Decimal("4")
     ) / Decimal("13")
+    assert features.vamp == features.microprice
     assert features.aggressive_trade_imbalance == Decimal("1") / Decimal("3")
     assert features.feed_latency_ms == Decimal("50.0")
     assert features.source_event_ids == ("snapshot", "trade-2", "trade-3", "as-of")

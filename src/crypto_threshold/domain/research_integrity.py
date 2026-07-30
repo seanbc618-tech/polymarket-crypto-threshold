@@ -99,3 +99,17 @@ class ResearchIntegrityReport:
     passed: bool
     reasons: tuple[str, ...] = field(default_factory=tuple)
     source_version: str = "freqtrade-inspired-integrity-r2-v1"
+
+
+@dataclass(frozen=True)
+class DryRunIsolationReport:
+    """Explicit proof that a research runner has no authenticated mutation path."""
+
+    trading_disabled: bool
+    credentials_absent: bool
+    authenticated_channel_disabled: bool
+    mutation_surface_absent: bool
+    passed: bool
+    reasons: tuple[str, ...]
+    manifest_hash: str
+    source_version: str = "freqtrade-inspired-dry-run-isolation-r2-v1"

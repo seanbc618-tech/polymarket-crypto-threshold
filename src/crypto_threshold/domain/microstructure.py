@@ -145,6 +145,7 @@ class L2MicrostructureFeatures:
     ask_depth: Decimal
     book_imbalance: Decimal
     microprice: Decimal
+    vamp: Decimal
     aggressive_trade_imbalance: Decimal
     feed_latency_ms: Decimal
     source_event_ids: tuple[str, ...]

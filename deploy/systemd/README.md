@@ -193,3 +193,36 @@ collector evaluates that same frozen artifact at
 `0/100/250/500/1000 ms`. Only closed CEX candles are accepted. Chainlink's
 completed public crypto-window response is fetched after resolution for
 labeling; its provisional opening value is never a prediction input.
+
+## Independent R1/R2/R3 microstructure shadow
+
+This unit is separate from both the Daily Forward and short-Up/Down evidence
+databases:
+
+- unit: `crypto-threshold-microstructure-shadow.service`
+- environment: `/etc/polymarket-crypto-microstructure.env`
+- database: `/opt/polymarket-crypto-threshold/data/microstructure-shadow.db`
+- backup directory: `/opt/polymarket-crypto-threshold/backups/microstructure`
+- public Binance spot snapshot/diff-book/aggregate-trade and USD-M mark reads
+- bounded two-hour run; `TRADING_DISABLED=true`; no wallet or authenticated API
+
+Install the reviewed environment and units:
+
+```bash
+sudo install -o root -g crypto-threshold -m 0640 \
+  deploy/env/hk-microstructure-shadow.example.env \
+  /etc/polymarket-crypto-microstructure.env
+sudo install -o root -g root -m 0644 \
+  deploy/systemd/crypto-threshold-microstructure-shadow.service \
+  deploy/systemd/crypto-threshold-microstructure-backup.service \
+  deploy/systemd/crypto-threshold-microstructure-backup.timer \
+  /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now crypto-threshold-microstructure-backup.timer
+sudo systemctl enable --now crypto-threshold-microstructure-shadow.service
+```
+
+The process stores raw payloads before derived features, checks Binance
+snapshot/diff continuity, runs the R2 integrity gate when enough rows exist,
+and records the sealed R3 factor plan. No factor is promoted automatically.
+Starting this unit does not restart either existing shadow unit.

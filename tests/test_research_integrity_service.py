@@ -293,3 +293,30 @@ def test_integrity_analysis_requires_version_multiple_windows_and_gap_bound() ->
             startup_rows=(2, 11),
             max_timestamp_gap=timedelta(0),
         )
+
+
+def test_dry_run_isolation_is_explicit_and_fail_closed() -> None:
+    service = ResearchIntegrityService()
+    safe = service.dry_run_isolation(
+        trading_disabled=True,
+        credentials_present=False,
+        authenticated_channel_enabled=False,
+        mutation_surface_enabled=False,
+    )
+    assert safe.passed is True
+    assert safe.reasons == ()
+    assert len(safe.manifest_hash) == 64
+
+    unsafe = service.dry_run_isolation(
+        trading_disabled=False,
+        credentials_present=True,
+        authenticated_channel_enabled=True,
+        mutation_surface_enabled=True,
+    )
+    assert unsafe.passed is False
+    assert unsafe.reasons == (
+        "trading_not_disabled",
+        "credentials_present",
+        "authenticated_channel_enabled",
+        "mutation_surface_enabled",
+    )

@@ -129,6 +129,40 @@ No order signer, authenticated trading client, BUY/SELL method, cancellation
 path, or position mutation exists in the runtime. Setting
 `TRADING_DISABLED=false` makes `doctor` fail.
 
+## R1/R2/R3 Research Expansion
+
+The four requested research work packages are now tracked explicitly:
+
+- **R1 HFTBacktest-inspired replay — IMPLEMENTED / shadow capture ready.**
+  `HftReplayService` replays timestamped L2 snapshots, absolute depth updates,
+  and trades with entry/response latency, risk-averse and probability queue
+  models, all-or-nothing/partial fills, VAMP, OBI, micro-price, aggressive
+  trade imbalance, and sensitivity manifests. The independent Binance
+  microstructure collector adds raw snapshot/diff/trade capture, perpetual
+  mark/index basis, and synchronized BTC lead correlation where available.
+- **R2 Freqtrade-inspired integrity — IMPLEMENTED / gate runner wired.**
+  Prefix look-ahead, recursive startup windows, raw observed/received timestamp
+  checks, source hashes, timestamp gaps, grouped chronological splits, purge,
+  and embargo are sealed into deterministic reports. A passing report still
+  requires enough real candidate rows.
+- **R3 VectorBT-inspired screening — IMPLEMENTED / sealed plan ready.**
+  The factor service pre-registers the factor grid, retains failed trials, and
+  compares candidate, executable market baseline, and frozen v4 metrics with
+  fee-adjusted net EV and conservative replay fill ratios. It refuses
+  promotion and remains `promotion_allowed=false`.
+- **R4 NautilusTrader execution — REFERENCE BLUEPRINT ONLY / BLOCKED.**
+  The isolated capability map covers FAK/FOK/GTC/GTD, ambiguous submit state,
+  cancel races, and reconciliation semantics, but no adapter, signer, or
+  authenticated reconciliation may be opened before positive executable,
+  event-diverse evidence survives R1–R3 and receives separate approval.
+
+The new unit
+`crypto-threshold-microstructure-shadow.service` writes only
+`data/microstructure-shadow.db`, has no Polymarket credentials, and is bounded
+to a two-hour public-data run. Its evidence cannot be counted as settled
+Polymarket OOS until each observation is joined to an authoritative settlement
+label with a complete raw-input and replay manifest.
+
 ## Deployment Network Contract
 
 - On the current local macOS/Mainland China development network, an outbound

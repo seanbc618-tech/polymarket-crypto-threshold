@@ -28,6 +28,7 @@ class Settings(BaseSettings):
     POLYMARKET_CLOB_API_BASE: str = "https://clob.polymarket.com"
     POLYMARKET_SITE_API_BASE: str = "https://polymarket.com/api"
     BINANCE_API_BASE: str = "https://api.binance.com/api/v3"
+    BINANCE_FUTURES_API_BASE: str = "https://fapi.binance.com/fapi/v1"
     BINANCE_STREAM_URL: str = "wss://stream.binance.com:443"
     BINANCE_STREAM_PROXY_URL: str | None = None
     COINBASE_API_BASE: str = "https://api.coinbase.com/v2"
@@ -82,6 +83,31 @@ class Settings(BaseSettings):
     SHORT_CHALLENGER_MIN_REMAINING_SECONDS: int = Field(default=5, ge=1, le=60)
     CALIBRATION_BINS: int = Field(default=10, ge=2, le=100)
     CALIBRATION_MIN_TRAIN_SIZE: int = Field(default=30, ge=1)
+
+    # Independent public CEX microstructure research store. This is never
+    # shared with the Daily or short-Up/Down evidence databases.
+    MICROSTRUCTURE_ENABLED: bool = False
+    MICROSTRUCTURE_DATABASE_PATH: str = "data/microstructure-shadow.db"
+    MICROSTRUCTURE_SYMBOLS: str = "BTCUSDT,ETHUSDT,SOLUSDT,XRPUSDT"
+    MICROSTRUCTURE_POLL_SECONDS: float = Field(default=0.25, gt=0)
+    MICROSTRUCTURE_SNAPSHOT_SECONDS: float = Field(default=60.0, gt=0)
+    MICROSTRUCTURE_FEATURE_SECONDS: float = Field(default=5.0, gt=0)
+    MICROSTRUCTURE_INTEGRITY_SECONDS: float = Field(default=300.0, gt=0)
+    MICROSTRUCTURE_DEPTH_LEVELS: int = Field(default=5, ge=1, le=100)
+    MICROSTRUCTURE_TRADE_LOOKBACK_SECONDS: float = Field(default=5.0, gt=0)
+    MICROSTRUCTURE_EVENT_BATCH_LIMIT: int = Field(default=50_000, ge=1, le=200_000)
+    MICROSTRUCTURE_INTEGRITY_SAMPLE_LIMIT: int = Field(
+        default=500,
+        ge=102,
+        le=10_000,
+    )
+    MICROSTRUCTURE_STREAM_STALE_SECONDS: float = Field(default=30.0, gt=0)
+    MICROSTRUCTURE_STREAM_MAX_EVENTS: int = Field(
+        default=200_000,
+        ge=1_000,
+        le=2_000_000,
+    )
+    MICROSTRUCTURE_DURATION_HOURS: float = Field(default=2.0, gt=0)
 
     DASHBOARD_PUBLIC_ORIGIN: str | None = None
 
@@ -179,6 +205,12 @@ class Settings(BaseSettings):
             )
         return f"https://{parsed.hostname.rstrip('.').lower()}"
 
+    @field_validator("MICROSTRUCTURE_SYMBOLS")
+    @classmethod
+    def microstructure_symbols_are_declared_csv(cls, value: object) -> str:
+        symbols = _csv_symbols(value, field="MICROSTRUCTURE_SYMBOLS")
+        return ",".join(symbols)
+
     @property
     def wallet_configured(self) -> bool:
         return bool(self.POLYMARKET_PRIVATE_KEY and self.POLYMARKET_FUNDER)
@@ -195,6 +227,13 @@ class Settings(BaseSettings):
         return _csv_integers(
             self.SHORT_CHALLENGER_LATENCIES_MS,
             field="SHORT_CHALLENGER_LATENCIES_MS",
+        )
+
+    @property
+    def microstructure_symbols(self) -> tuple[str, ...]:
+        return _csv_symbols(
+            self.MICROSTRUCTURE_SYMBOLS,
+            field="MICROSTRUCTURE_SYMBOLS",
         )
 
 
@@ -241,3 +280,25 @@ def _csv_integers(value: object, *, field: str) -> tuple[int, ...]:
     if not parsed:
         raise ValueError(f"{field} must not be empty")
     return parsed
+
+
+def _csv_symbols(value: object, *, field: str) -> tuple[str, ...]:
+    if not isinstance(value, str):
+        raise ValueError(f"{field} must be a comma-separated string")
+    symbols = tuple(
+        item.strip().upper()
+        for item in value.split(",")
+        if item.strip()
+    )
+    if (
+        not symbols
+        or len(set(symbols)) != len(symbols)
+        or any(
+            not symbol.endswith("USDT")
+            or not symbol[:-4].isalnum()
+            or len(symbol) > 20
+            for symbol in symbols
+        )
+    ):
+        raise ValueError(f"{field} contains an invalid or duplicate symbol")
+    return symbols

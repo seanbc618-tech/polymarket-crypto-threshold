@@ -14,6 +14,12 @@ There is no signer, authenticated venue client, BUY/SELL placement,
 cancellation, reconciliation, or position mutation implementation.
 `TRADING_DISABLED` must remain `true`.
 
+The R1/R2/R3 expansion is also public-data only: Binance spot
+snapshot/diff-book/aggregate-trade capture is stored in an independent SQLite
+database, anti-lookahead and purge/embargo checks run on that tape, and a
+sealed factor screen compares fee-adjusted OOS results with the market
+baseline and frozen v4 model. It does not place or sign an order.
+
 The daily-threshold family supports only contracts whose binding text provides
 all of these facts:
 
@@ -91,6 +97,9 @@ uv run crypto-threshold replay-verify --dataset <combined>
 uv run crypto-threshold calibrate --dataset <combined>
 uv run crypto-threshold execution-blueprint
 uv run crypto-threshold research-tooling-status
+MICROSTRUCTURE_ENABLED=true uv run crypto-threshold microstructure-shadow --once
+uv run crypto-threshold microstructure-status --db data/microstructure-shadow.db
+uv run crypto-threshold factor-screen <sealed-observations.json>
 ```
 
 `analyze` accepts a real Gamma market ID or condition ID. It does not accept an
@@ -135,6 +144,13 @@ networked provider checks and shadow monitoring. Configure
 proxy environment. The VPS templates under `deploy/` omit all proxy settings,
 require synchronized host time, and retain REST as the final analysis
 authority.
+
+The independent R1/R2/R3 VPS unit is
+`crypto-threshold-microstructure-shadow.service`. It runs public Binance
+capture for a bounded two-hour window into
+`data/microstructure-shadow.db`; its backup unit/timer uses
+`backups/microstructure`. It is separate from both the Daily Forward and
+Up/Down databases and can be started without restarting either existing unit.
 
 Mechanical evidence can be checked without opening the database for writes:
 
@@ -191,6 +207,8 @@ boundaries, and remaining risks. The future execution contract is documented in
 [NAUTILUS-EXECUTION-BLUEPRINT.md](docs/NAUTILUS-EXECUTION-BLUEPRINT.md). The
 offline Level-2 replay and anti-leakage gates are documented in
 [HFT-REPLAY-AND-INTEGRITY.md](docs/HFT-REPLAY-AND-INTEGRITY.md).
+The R3 factor registration and screening contract is documented in
+[R3-FACTOR-SCREENING.md](docs/R3-FACTOR-SCREENING.md).
 
 ## License
 

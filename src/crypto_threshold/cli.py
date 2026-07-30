@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import time
+from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
+from typing import Any, cast
 from urllib.parse import urlparse
 
 import typer
@@ -17,6 +20,10 @@ from crypto_threshold.adapters.polymarket.client import GammaClobReadClient
 from crypto_threshold.adapters.polymarket.stream import PolymarketStreamBridge
 from crypto_threshold.adapters.polymarket.translator import translate_market
 from crypto_threshold.adapters.prices.binance import BinanceProvider
+from crypto_threshold.adapters.prices.binance_microstructure import (
+    BinanceMicrostructureRestClient,
+    BinanceMicrostructureStream,
+)
 from crypto_threshold.adapters.prices.chainlink_stream import (
     ChainlinkReferencePriceStream,
 )
@@ -30,6 +37,13 @@ from crypto_threshold.domain.assets import (
     DAILY_THRESHOLD_ASSETS,
     SUPPORTED_CHAINLINK_PAIRS,
 )
+from crypto_threshold.domain.factor_research import (
+    FactorComparator,
+    FactorExperimentSpec,
+    FactorObservation,
+    FactorRule,
+    FactorTradeSide,
+)
 from crypto_threshold.domain.rules import (
     DAILY_THRESHOLD_FAMILY,
     SHORT_UPDOWN_FAMILY,
@@ -42,8 +56,16 @@ from crypto_threshold.services.cex_direction_service import (
     CexDirectionTrainingService,
 )
 from crypto_threshold.services.discovery_service import DiscoveryService
+from crypto_threshold.services.factor_screening_service import (
+    FACTOR_SCREENING_SOURCE_VERSION,
+    FactorScreeningService,
+)
 from crypto_threshold.services.hft_replay_service import HFT_REPLAY_SOURCE_VERSION
 from crypto_threshold.services.market_workflow_service import MarketWorkflowService
+from crypto_threshold.services.microstructure_shadow_service import (
+    MicrostructureShadowConfig,
+    MicrostructureShadowService,
+)
 from crypto_threshold.services.nautilus_execution_blueprint import (
     NautilusExecutionBlueprint,
 )
@@ -59,6 +81,7 @@ from crypto_threshold.services.shadow_monitor_service import ShadowMonitorServic
 from crypto_threshold.services.short_challenger_service import ShortChallengerService
 from crypto_threshold.services.stream_research_service import StreamResearchCoordinator
 from crypto_threshold.storage.db import SCHEMA_VERSION, Database
+from crypto_threshold.storage.microstructure_store import MicrostructureStore
 from crypto_threshold.storage.repositories import Repository
 
 app = typer.Typer(
@@ -915,26 +938,191 @@ def execution_blueprint() -> None:
 
 @app.command("research-tooling-status")
 def research_tooling_status() -> None:
-    """Show the implemented R1/R2 core and its still-blocked evidence gates."""
-    console.print("R1 evidence: REAL L2 TAPES PENDING")
-    console.print("R2 evidence: SEALED CANDIDATE RUN PENDING")
+    """Show R1/R2/R3 implementation and the evidence gates still pending."""
+    console.print("R1 implementation: PUBLIC L2/TICK CAPTURE READY")
+    console.print("R2 implementation: INTEGRITY GATES WIRED")
+    console.print("R3 implementation: PREREGISTERED FACTOR SCREEN READY")
+    console.print("R3 evidence: SEALED PLAN READY; SETTLED OOS EVIDENCE PENDING")
     table = Table("Work package", "Core", "Evidence status", "Source version")
     table.add_row(
         "R1 HFT replay",
         "L2 + feed/order latency + queue/fill grid + attribution",
-        "REAL L2 TAPES PENDING",
+        "SHADOW CAPTURE READY; SETTLED EXECUTABLE EVIDENCE PENDING",
         HFT_REPLAY_SOURCE_VERSION,
     )
     table.add_row(
         "R2 integrity",
         "lookahead + recursive + timestamps + purge/embargo",
-        "SEALED CANDIDATE RUN PENDING",
+        "RUNS ON CAPTURED SAMPLES; PASS/FAIL EVIDENCE PENDING",
         RESEARCH_INTEGRITY_SOURCE_VERSION,
+    )
+    table.add_row(
+        "R3 factor screen",
+        "pre-registered factors + fee-adjusted OOS vs market/frozen v4",
+        "SEALED PLAN READY; SETTLED OOS EVIDENCE PENDING",
+        FACTOR_SCREENING_SOURCE_VERSION,
     )
     console.print(table)
     console.print(
         "[yellow]LIVE NO-GO[/] submission=false signing=false "
         "authenticated_reconciliation=false"
+    )
+
+
+@app.command("microstructure-shadow")
+def microstructure_shadow(
+    once: bool = typer.Option(False, "--once", help="Run exactly one capture cycle"),
+    duration_hours: float | None = typer.Option(
+        None,
+        "--duration-hours",
+        min=0.001,
+        help="Stop cleanly after this many wall-clock hours",
+    ),
+) -> None:
+    """Capture public Binance L2/trades and run isolated R1/R2/R3 research."""
+    settings = get_settings()
+    if once and duration_hours is not None:
+        console.print("[red]Use either --once or --duration-hours, not both.[/]")
+        raise typer.Exit(code=2)
+    if not settings.MICROSTRUCTURE_ENABLED:
+        console.print("[yellow]Microstructure shadow is disabled by default.[/]")
+        raise typer.Exit(code=2)
+    if (
+        not settings.TRADING_DISABLED
+        or settings.POLYMARKET_PRIVATE_KEY is not None
+        or settings.POLYMARKET_FUNDER is not None
+    ):
+        console.print("[red]Unsafe microstructure configuration; refusing to start.[/]")
+        raise typer.Exit(code=2)
+
+    store = MicrostructureStore(settings.MICROSTRUCTURE_DATABASE_PATH)
+    store.initialize()
+    stream = BinanceMicrostructureStream(
+        symbols=settings.microstructure_symbols,
+        stale_seconds=settings.MICROSTRUCTURE_STREAM_STALE_SECONDS,
+        max_events=settings.MICROSTRUCTURE_STREAM_MAX_EVENTS,
+        stream_url=settings.BINANCE_STREAM_URL,
+        proxy_url=settings.BINANCE_STREAM_PROXY_URL,
+    )
+    rest = BinanceMicrostructureRestClient(
+        spot_base_url=settings.BINANCE_API_BASE,
+        futures_base_url=settings.BINANCE_FUTURES_API_BASE,
+    )
+    config = MicrostructureShadowConfig(
+        symbols=settings.microstructure_symbols,
+        poll_seconds=settings.MICROSTRUCTURE_POLL_SECONDS,
+        snapshot_seconds=settings.MICROSTRUCTURE_SNAPSHOT_SECONDS,
+        feature_seconds=settings.MICROSTRUCTURE_FEATURE_SECONDS,
+        integrity_seconds=settings.MICROSTRUCTURE_INTEGRITY_SECONDS,
+        depth_levels=settings.MICROSTRUCTURE_DEPTH_LEVELS,
+        trade_lookback_seconds=settings.MICROSTRUCTURE_TRADE_LOOKBACK_SECONDS,
+        event_batch_limit=settings.MICROSTRUCTURE_EVENT_BATCH_LIMIT,
+        integrity_sample_limit=settings.MICROSTRUCTURE_INTEGRITY_SAMPLE_LIMIT,
+    )
+    service = MicrostructureShadowService(
+        store=store,
+        stream=stream,
+        rest=rest,
+        config=config,
+    )
+    try:
+        session_id = service.run(
+            duration_hours=(
+                None
+                if once
+                else duration_hours or settings.MICROSTRUCTURE_DURATION_HOURS
+            ),
+            once=once,
+        )
+    except typer.Exit:
+        raise
+    except Exception as exc:
+        console.print(
+            f"[red]Microstructure shadow failed:[/] {type(exc).__name__}: {exc}"
+        )
+        raise typer.Exit(code=1) from exc
+    summary = store.summary()
+    console.print(
+        f"[green]microstructure shadow complete[/] session={session_id} "
+        f"events={summary['events']} features={summary['feature_samples']} "
+        f"integrity_runs={summary['integrity_runs']} "
+        f"factor_runs={summary['factor_runs']}"
+    )
+
+
+@app.command("microstructure-status")
+def microstructure_status(
+    db: Path = typer.Option(
+        Path("data/microstructure-shadow.db"),
+        "--db",
+        help="Independent microstructure evidence database",
+    ),
+) -> None:
+    """Read an independent microstructure database without opening writes."""
+    try:
+        summary = MicrostructureStore(db, read_only=True).summary()
+    except Exception as exc:
+        console.print(
+            f"[red]Microstructure status failed:[/] {type(exc).__name__}: {exc}"
+        )
+        raise typer.Exit(code=2) from exc
+    session = summary.get("session")
+    session_status = (
+        str(session.get("status"))
+        if isinstance(session, dict)
+        else "none"
+    )
+    console.print(
+        f"session_status={session_status} events={summary['events']} "
+        f"symbols={summary['symbols']} snapshots={summary['snapshots']} "
+        f"depth={summary['depth_events']} trades={summary['trades']} "
+        f"marks={summary['marks']} features={summary['feature_samples']} "
+        f"integrity_runs={summary['integrity_runs']} "
+        f"factor_runs={summary['factor_runs']}"
+    )
+
+
+@app.command("factor-screen")
+def factor_screen(
+    input_path: Path = typer.Argument(
+        ...,
+        help="JSON envelope with a sealed spec and independent settled observations",
+    ),
+    output: Path | None = typer.Option(
+        None,
+        "--output",
+        help="Optional JSON report output path",
+    ),
+) -> None:
+    """Run the sealed R3 factor screen on an offline observation envelope."""
+    try:
+        payload = json.loads(input_path.read_text())
+        if not isinstance(payload, dict):
+            raise ValueError("factor input must be a JSON object")
+        spec = _factor_spec_from_json(payload.get("spec"))
+        raw_observations = payload.get("observations")
+        if not isinstance(raw_observations, list):
+            raise ValueError("factor input observations must be a JSON array")
+        observations = tuple(
+            _factor_observation_from_json(item) for item in raw_observations
+        )
+        report = FactorScreeningService().screen(spec, observations)
+        encoded = json.dumps(
+            _jsonable({"source_version": FACTOR_SCREENING_SOURCE_VERSION, "report": report}),
+            sort_keys=True,
+            indent=2,
+        ) + "\n"
+        if output is not None:
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text(encoded)
+    except Exception as exc:
+        console.print(f"[red]Factor screen failed:[/] {type(exc).__name__}: {exc}")
+        raise typer.Exit(code=2) from exc
+    console.print(
+        f"factor_screen complete groups={report.event_group_count} "
+        f"dates={report.date_count} trials={len(report.trials)} "
+        f"failed={report.failed_trial_count} promotion_allowed="
+        f"{report.promotion_allowed}"
     )
 
 
@@ -1181,3 +1369,108 @@ def _valid_https_url(value: str) -> bool:
 def _valid_wss_url(value: str) -> bool:
     parsed = urlparse(value)
     return parsed.scheme == "wss" and bool(parsed.netloc)
+
+
+def _factor_spec_from_json(value: object) -> FactorExperimentSpec:
+    if not isinstance(value, dict):
+        raise ValueError("factor input spec must be an object")
+    raw_rules = value.get("rules")
+    if not isinstance(raw_rules, list):
+        raise ValueError("factor input spec rules must be an array")
+    raw_assets = value.get("required_assets")
+    if not isinstance(raw_assets, list):
+        raise ValueError("factor input required_assets must be an array")
+    rules: list[FactorRule] = []
+    for raw_rule in raw_rules:
+        if not isinstance(raw_rule, dict):
+            raise ValueError("factor rule must be an object")
+        rules.append(
+            FactorRule(
+                rule_id=str(raw_rule["rule_id"]),
+                factor_name=str(raw_rule["factor_name"]),
+                comparator=FactorComparator(str(raw_rule["comparator"])),
+                threshold=Decimal(str(raw_rule["threshold"])),
+                trade_side=FactorTradeSide(str(raw_rule["trade_side"])),
+            )
+        )
+    return FactorExperimentSpec(
+        experiment_id=str(value["experiment_id"]),
+        spec_version=str(value["spec_version"]),
+        created_at=_json_datetime(value["created_at"], "created_at"),
+        training_cutoff_at=_json_datetime(
+            value["training_cutoff_at"],
+            "training_cutoff_at",
+        ),
+        minimum_oos_groups=int(value["minimum_oos_groups"]),
+        minimum_dates=int(value["minimum_dates"]),
+        minimum_groups_per_asset=int(value["minimum_groups_per_asset"]),
+        required_assets=tuple(str(item).upper() for item in raw_assets),
+        stake_usdc=Decimal(str(value["stake_usdc"])),
+        frozen_model_version=str(value["frozen_model_version"]),
+        market_baseline_version=str(value["market_baseline_version"]),
+        integrity_source_version=str(value["integrity_source_version"]),
+        replay_source_version=str(value["replay_source_version"]),
+        rules=tuple(rules),
+        spec_hash=str(value["spec_hash"]),
+    )
+
+
+def _factor_observation_from_json(value: object) -> FactorObservation:
+    if not isinstance(value, dict):
+        raise ValueError("factor observation must be an object")
+    raw_factors = value.get("factor_values")
+    if not isinstance(raw_factors, dict):
+        raise ValueError("factor observation factor_values must be an object")
+    return FactorObservation(
+        observation_id=str(value["observation_id"]),
+        event_group_id=str(value["event_group_id"]),
+        asset=str(value["asset"]).upper(),
+        target_time_utc=_json_datetime(value["target_time_utc"], "target_time_utc"),
+        decision_at=_json_datetime(value["decision_at"], "decision_at"),
+        factor_values={
+            str(key): Decimal(str(item)) for key, item in raw_factors.items()
+        },
+        candidate_probability=Decimal(str(value["candidate_probability"])),
+        market_probability=Decimal(str(value["market_probability"])),
+        frozen_v4_probability=Decimal(str(value["frozen_v4_probability"])),
+        outcome_yes=_json_boolean(value["outcome_yes"], "outcome_yes"),
+        executable_yes_price=Decimal(str(value["executable_yes_price"])),
+        executable_no_price=Decimal(str(value["executable_no_price"])),
+        fee_rate=Decimal(str(value["fee_rate"])),
+        fill_ratio=Decimal(str(value["fill_ratio"])),
+        integrity_manifest_hash=str(value["integrity_manifest_hash"]),
+        replay_manifest_hash=str(value["replay_manifest_hash"]),
+    )
+
+
+def _json_datetime(value: object, field: str) -> datetime:
+    if not isinstance(value, str):
+        raise ValueError(f"{field} must be an ISO timestamp string")
+    parsed = datetime.fromisoformat(value)
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError(f"{field} must be timezone-aware")
+    return parsed.astimezone(UTC)
+
+
+def _json_boolean(value: object, field: str) -> bool:
+    if not isinstance(value, bool):
+        raise ValueError(f"{field} must be a JSON boolean")
+    return value
+
+
+def _jsonable(value: object) -> Any:
+    if isinstance(value, datetime):
+        return value.astimezone(UTC).isoformat()
+    if isinstance(value, Decimal):
+        return str(value)
+    if hasattr(value, "value") and not isinstance(value, (str, bytes)):
+        enum_value = getattr(value, "value")
+        if isinstance(enum_value, (str, int, float, bool)):
+            return enum_value
+    if hasattr(value, "__dataclass_fields__"):
+        return _jsonable(asdict(cast(Any, value)))
+    if isinstance(value, dict):
+        return {str(key): _jsonable(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return [_jsonable(item) for item in value]
+    return value

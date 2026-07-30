@@ -23,6 +23,9 @@ def test_help_and_analyze_contract() -> None:
     challenger_status = runner.invoke(app, ["short-challenger-status", "--help"])
     execution_blueprint = runner.invoke(app, ["execution-blueprint", "--help"])
     research_tooling = runner.invoke(app, ["research-tooling-status", "--help"])
+    microstructure_shadow = runner.invoke(app, ["microstructure-shadow", "--help"])
+    microstructure_status = runner.invoke(app, ["microstructure-status", "--help"])
+    factor_screen = runner.invoke(app, ["factor-screen", "--help"])
     assert root.exit_code == 0
     assert analyze.exit_code == 0
     assert dashboard.exit_code == 0
@@ -32,6 +35,9 @@ def test_help_and_analyze_contract() -> None:
     assert challenger_status.exit_code == 0
     assert execution_blueprint.exit_code == 0
     assert research_tooling.exit_code == 0
+    assert microstructure_shadow.exit_code == 0
+    assert microstructure_status.exit_code == 0
+    assert factor_screen.exit_code == 0
     assert "--market" in analyze.output
     assert "market-prob" not in analyze.output
     assert "read-only research dashboard" in dashboard.output
@@ -39,6 +45,9 @@ def test_help_and_analyze_contract() -> None:
     assert "--training-dataset" in replay_build.output
     assert "--training-label-count" in replay_plan.output
     assert "--db" in challenger_status.output
+    assert "--duration-hours" in microstructure_shadow.output
+    assert "--db" in microstructure_status.output
+    assert "JSON envelope" in factor_screen.output
     assert "non-executable" in execution_blueprint.output
     assert "R1/R2" in research_tooling.output
 
@@ -58,9 +67,10 @@ def test_research_tooling_cli_reports_core_without_claiming_acceptance() -> None
     result = runner.invoke(app, ["research-tooling-status"])
     assert result.exit_code == 0
     assert "R1 HFT replay" in result.output
-    assert "REAL L2 TAPES PENDING" in result.output
+    assert "PUBLIC L2/TICK CAPTURE READY" in result.output
     assert "R2 integrity" in result.output
-    assert "SEALED CANDIDATE RUN PENDING" in result.output
+    assert "R3 factor screen" in result.output
+    assert "SEALED PLAN READY" in result.output
     assert "LIVE NO-GO" in result.output
     assert "submission=false" in result.output
 
@@ -152,6 +162,36 @@ def test_shadow_is_disabled_by_default() -> None:
     get_settings.cache_clear()
     assert result.exit_code == 2
     assert "disabled by default" in result.output
+
+
+def test_microstructure_shadow_is_disabled_by_default() -> None:
+    get_settings.cache_clear()
+    result = runner.invoke(app, ["microstructure-shadow", "--once"])
+    get_settings.cache_clear()
+    assert result.exit_code == 2
+    assert "disabled by default" in result.output
+
+
+def test_microstructure_shadow_rejects_wallet_configuration(
+    monkeypatch: object,
+) -> None:
+    monkeypatch.setenv("MICROSTRUCTURE_ENABLED", "true")
+    monkeypatch.setenv("POLYMARKET_FUNDER", "0xdeadbeef")
+    get_settings.cache_clear()
+    result = runner.invoke(app, ["microstructure-shadow", "--once"])
+    get_settings.cache_clear()
+    assert result.exit_code == 2
+    assert "Unsafe microstructure configuration" in result.output
+    assert "deadbeef" not in result.output
+
+
+def test_microstructure_status_opens_missing_db_read_only(tmp_path: Path) -> None:
+    result = runner.invoke(
+        app,
+        ["microstructure-status", "--db", str(tmp_path / "missing.db")],
+    )
+    assert result.exit_code == 2
+    assert "does not exist" in result.output
 
 
 def test_shadow_rejects_conflicting_duration_modes() -> None:

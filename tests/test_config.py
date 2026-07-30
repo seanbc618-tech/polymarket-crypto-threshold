@@ -43,6 +43,15 @@ def test_stream_defaults_to_disabled_read_only_shadow() -> None:
     assert settings.SHORT_CHALLENGER_MIN_REMAINING_SECONDS == 5
     assert settings.BINANCE_STREAM_PROXY_URL is None
     assert settings.PAPER_MIN_NET_EV == Decimal("0.02")
+    assert settings.MICROSTRUCTURE_ENABLED is False
+    assert settings.microstructure_symbols == (
+        "BTCUSDT",
+        "ETHUSDT",
+        "SOLUSDT",
+        "XRPUSDT",
+    )
+    assert settings.MICROSTRUCTURE_DEPTH_LEVELS == 5
+    assert settings.MICROSTRUCTURE_INTEGRITY_SAMPLE_LIMIT == 500
 
 
 def test_binance_stream_proxy_is_explicit_no_auth_origin() -> None:
@@ -83,3 +92,15 @@ def test_challenger_grid_rejects_undeclared_or_unsorted_values() -> None:
             _env_file=None,
             SHORT_CHALLENGER_LATENCIES_MS="100,0,250",
         )
+
+
+def test_microstructure_symbols_are_unique_supported_csv() -> None:
+    settings = Settings(
+        _env_file=None,
+        MICROSTRUCTURE_SYMBOLS="btcUSDT, ETHUSDT",
+    )
+    assert settings.microstructure_symbols == ("BTCUSDT", "ETHUSDT")
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, MICROSTRUCTURE_SYMBOLS="BTCUSDT,BTCUSDT")
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, MICROSTRUCTURE_SYMBOLS="BTC-USD")
