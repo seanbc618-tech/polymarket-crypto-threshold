@@ -163,6 +163,83 @@ to a two-hour public-data run. Its evidence cannot be counted as settled
 Polymarket OOS until each observation is joined to an authoritative settlement
 label with a complete raw-input and replay manifest.
 
+### 2026-07-30 R1-R3 VPS Activation Evidence
+
+Runtime commit `e06e6812186d91eebdb567f8269516d1fdd4be6a` is deployed
+for the independent microstructure unit only. Its current capture session,
+`micro:5580c2ea-b970-4f1f-a16f-6f2cd439e42f`, started at
+`2026-07-30T09:17:10.255156Z`. At the `2026-07-30T09:38:19Z` read-only
+snapshot, it was running as PID `225191` with zero automatic restarts. Forward
+remained PID `180886`; Up/Down remained PID `207859`; both also had zero
+automatic restarts.
+
+The preceding five-second-cadence session is preserved. Its first per-asset
+causal-prefix/recursive reports passed, but once a non-empty chronological
+split formed, all four assets correctly failed on one approximately
+`19.67-20.00s` derived-feature timestamp gap. The split itself retained 31
+training groups and 12-13 test groups per asset. Raw events continued arriving;
+peak full-tape reconstruction could not sustain a five-second derived cadence.
+The failure was neither deleted nor relabeled.
+
+Commit `e06e681` keeps full raw L2/trade persistence continuous and declares a
+ten-second derived-feature cadence with a 30-second fail-closed maximum gap.
+This is a lower derived sampling rate, not an interpolation of the missing
+interval. A read-only pre-deployment replay of the preserved rows produced
+zero violations and non-empty purged/embargoed splits under that declaration.
+
+All four first REST snapshot/WebSocket diff bridges were exact:
+
+- BTC `98038345761 -> 98038345762`;
+- ETH `79338523790 -> 79338523791`;
+- SOL `29668755091 -> 29668755092`;
+- XRP `25895434820 -> 25895434821`.
+
+The current session had persisted 41,383 depth events, 143,593 trades, 84
+snapshots, 84 perpetual marks, and 499 feature samples across BTC, ETH, SOL,
+and XRP. Maximum observed derived-feature gaps were `10.895s`, `10.847s`,
+`10.901s`, and `10.903s` respectively. An independent read-only join from
+every feature's source-event IDs back to the raw receipt timestamps found
+`0/499` future-receipt violations. Live
+features included OBI, micro-price, VAMP, aggressive-trade imbalance, feed
+latency, spot/perpetual basis, and non-BTC lead correlations.
+
+A VPS read-only R1 runtime smoke reconstructed a 5,779-event BTC tape from
+snapshot update `98039109920` through final update `98039119285`. The declared
+five latency profiles, three queue models, and two fill models produced 30
+replay results and manifest
+`aede24c972453a4a48fba73bfe8291cddf3c942eede26ad7e0e719250c6727c1`.
+This proves the replay path runs against captured public data; it does not
+prove positive executable EV.
+
+The final per-asset R2 reports are all `passed` with zero violations:
+
+| Asset | Rows | Look-ahead | Recursive | Train/Test/Excluded | Integrity manifest |
+|---|---:|---:|---:|---:|---|
+| BTC | 119 | 1,190 | 30 | 18 / 6 / 95 | `345b4148636460eb100484f4ea95944fcbe21db7809a7403cec2e97aac80dd59` |
+| ETH | 119 | 1,190 | 30 | 18 / 6 / 95 | `fe2f39f70317f6915d9684d4232dbe6d44db4f716391810025a1c23aa83da9d1` |
+| SOL | 119 | 1,190 | 30 | 18 / 6 / 95 | `3b11da64b3d2e49365e251f4e868f2800cd4ee6800e7482c6bf21e3fbdd02a49` |
+| XRP | 118 | 1,180 | 30 | 17 / 6 / 95 | `2c97bb7a96a2a05058232f7f16a7e9055509b25fca6692c7fd73c6b7faf34e6d` |
+
+These reports retain the pre-declared 600-second purge, 300-second embargo,
+and 30-second maximum gap. They accept the deployed integrity runner for this
+captured feature pipeline; every later candidate dataset must rerun the same
+gates and cannot inherit this pass.
+
+The R3 plan is sealed as
+`preregistered_waiting_for_settled_oos` with spec hash
+`b8b274aec57d08d6188bcdb3e92f24d54ab4d70efd0ca1575522e54ea7a37bc4`.
+It pins the frozen comparison artifact to
+`cex-kline-chainlink-direction-v1+49093373ec3e`, has a passing dry-run
+isolation manifest, and retains `promotion_allowed=false`. No settled
+Polymarket OOS observations have been admitted to this factor screen.
+
+Five earlier activation sessions remain preserved as `interrupted` with their
+original fail-closed bridge/collection reasons and `operator_interrupt`; they
+were not deleted, rewritten, or merged into the current session. The live
+process environment contains no wallet, proxy, or Polymarket credential
+variable, and the isolated database contains no order, fill, position, signer,
+reconciliation, intent, or mutation table.
+
 ## Deployment Network Contract
 
 - On the current local macOS/Mainland China development network, an outbound
@@ -962,7 +1039,7 @@ accounting only and is not a profitability claim.
 
 #### R1 — HFTBacktest-inspired microstructure and execution replay
 
-**Status:** **CORE IMPLEMENTED — REAL L2 TAPES AND FORWARD EVIDENCE PENDING**
+**Status:** **CORE AND PUBLIC CAPTURE DEPLOYED — EXECUTABLE OOS EDGE PENDING**
 
 Use the HFTBacktest design as the reference for tick-by-tick replay, feed and
 order latency, order-book depth, queue position, and fill-model sensitivity.
@@ -989,17 +1066,17 @@ manifest identifies results which exist only under a less conservative queue
 or fill assumption. The same service extracts top-N imbalance, microprice,
 aggressive-trade imbalance, spread, and feed latency.
 
-This does not make R1 accepted. The project has not yet sealed real
-tick/L2 tapes across independent assets and dates, calibrated a queue model
-against observed paper/live acknowledgements, or shown positive executable
-edge under the conservative grid. Spot-perpetual basis and cross-venue
-lead/lag also require synchronized multi-venue tapes. Exact contracts and the
-remaining acceptance boundary are recorded in
+This does not make R1 accepted. The independent public collector now persists
+real BTC/ETH/SOL/XRP tick/L2 tapes, spot-perpetual basis, and synchronized BTC
+lead correlations. The project has not yet sealed those tapes across
+independent dates, calibrated a queue model against observed acknowledgements,
+or shown positive executable edge under the conservative grid. Exact contracts
+and the remaining acceptance boundary are recorded in
 `docs/HFT-REPLAY-AND-INTEGRITY.md`.
 
 #### R2 — Freqtrade-inspired research-integrity gates
 
-**Status:** **CORE GATES IMPLEMENTED — SEALED CANDIDATE RUN PENDING**
+**Status:** **CORE AND VPS RUNNER VERIFIED — CANDIDATE-SPECIFIC GATES REMAIN**
 
 Add explicit automated checks for look-ahead bias, recursive/rolling-feature
 contamination, timestamp gaps, future payloads, and accidental reuse of
@@ -1021,13 +1098,16 @@ deterministic manifest hashes.
 
 The gates have adversarial tests for future-frame means, recursive indicator
 drift, late payload receipt, target leakage, non-monotonic rows, timestamp
-gaps, and overlapping groups. R2 remains unaccepted until these gates are run
-against the exact sealed challenger dataset/feature builder with reviewed
-tolerances and zero unexplained violations.
+gaps, and overlapping groups. The VPS runner now executes them separately per
+asset and preserves both passing and failing reports. The final deployed
+cadence produced sealed non-empty purge/embargo splits with zero unexplained
+violations for all four assets. This verifies the runner and current feature
+pipeline; every future candidate dataset still has to pass its own sealed R2
+run.
 
 #### R3 — VectorBT-inspired offline factor screening
 
-**Status:** **PLANNED — after R1 and R2**
+**Status:** **CORE AND SEALED PLAN IMPLEMENTED — SETTLED OOS SCREEN PENDING**
 
 Use fast offline sweeps to test narrowly defined factor families and
 checkpoint/threshold combinations. Each experiment must declare its search
@@ -1038,6 +1118,14 @@ generation is a discovery aid, never an automatic production promotion path.
 R3 passes only when a factor family shows positive fee/slippage-adjusted
 out-of-sample edge across independent dates, assets, and regimes, with
 stability under the R1 latency/fill replay.
+
+The implemented `FactorScreeningService` hashes the complete experiment spec,
+requires unique post-cutoff event groups and raw integrity/replay manifests,
+retains every declared failed trial, and compares candidate, market baseline,
+and frozen-v4 Brier/log-loss/ECE plus conservative fill-adjusted net EV. The
+VPS runner has pre-registered the four-rule OBI/trade-imbalance/basis/BTC-lead
+grid, but `promotion_allowed=false` remains hard-coded and no unsettled row is
+eligible for the screen.
 
 #### R4 — NautilusTrader-inspired execution-layer spike
 
