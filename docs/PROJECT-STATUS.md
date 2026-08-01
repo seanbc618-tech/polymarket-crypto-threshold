@@ -1,10 +1,44 @@
 # Project Status
 
-**Date:** 2026-07-30
+**Date:** 2026-08-01
 
 **Classification:** Research prototype
 
 **Live status:** **NO-GO**
+
+## 2026-08-01 VPS Storage Lifecycle Fix
+
+The VPS reached `124G/146G` used (`85%`, `22G` available) because independent
+full SQLite snapshots multiplied the growing research databases. Crypto
+Threshold accounted for `52G`: `16G` of active evidence databases and `36G` of
+backups. The completed `1.886G` microstructure database was still copied every
+30 minutes, while daily Up/Down and Forward jobs retained multiple full
+generations. A separate Weather deployment accounted for approximately `46G`
+and was observed but not modified by this Crypto-only change.
+
+Commit `9a51b8f` adds an allow-listed storage pruner and systemd retention
+overrides. Up/Down, Forward, and microstructure now retain one latest runtime
+snapshot each; completed Phase 2 final, training, and OOS evidence directories
+are never traversed. The microstructure backup skips an unchanged source.
+Stale runtime SQLite artifacts have a six-hour grace period, deployment
+archives retain one copy with a seven-day grace period, and cleanup reports a
+failed unit if free space remains below `20 GiB`. The pruner has no write access
+to `data/` and refuses symlinks or files whose inode, size, or mtime changes
+after planning.
+
+The deployed dry-run identified exactly five redundant full snapshots. The
+confirmed first run deleted `15,913,095,168` bytes and a second dry-run returned
+zero targets. Crypto backups fell from `36G` to `21G`; the filesystem finished
+at `109G/146G` used (`75%`, `37G` available). Final, training, OOS, current
+Up/Down, current Forward, and current microstructure backups remain present,
+with no `.partial`, `-wal`, or `-shm` artifacts. A forced unchanged
+microstructure backup reused the same inode, size, and mtime. The daily cleanup
+timer is active for `04:50 CST`; existing backup timers remain active.
+
+No collector was restarted. Up/Down remained PID `231251` and Forward remained
+PID `231281`, both with zero automatic restarts; the completed microstructure
+collector remained inactive. This is a storage-safety fix only and does not
+change live **NO-GO**, model evidence, or trading permissions.
 
 ## Current Truth
 
