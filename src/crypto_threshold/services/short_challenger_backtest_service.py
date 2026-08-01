@@ -24,6 +24,7 @@ from crypto_threshold.domain.short_backtest import (
 )
 from crypto_threshold.services.short_challenger_service import (
     SHORT_CHALLENGER_SOURCE_VERSION,
+    SHORT_LATENCY_SOURCE_VERSION,
 )
 from crypto_threshold.storage.repositories import Repository
 
@@ -75,10 +76,13 @@ class ShortChallengerBacktestService:
         model_version: str,
         database_sha256: str,
         observation_source_version: str = SHORT_CHALLENGER_SOURCE_VERSION,
+        replay_source_version: str = SHORT_LATENCY_SOURCE_VERSION,
     ) -> ShortChallengerBacktestReport:
         """Build a deterministic report over an explicitly named frozen model."""
         if not model_version.strip():
             raise ShortChallengerBacktestError("model_version_is_required")
+        if not observation_source_version.strip() or not replay_source_version.strip():
+            raise ShortChallengerBacktestError("source_versions_are_required")
         if not _is_sha256(database_sha256):
             raise ShortChallengerBacktestError("database_sha256_is_required")
         probability_rows = self.repository.short_challenger_backtest_probability_rows(
@@ -88,6 +92,7 @@ class ShortChallengerBacktestService:
         replay_rows = self.repository.short_challenger_backtest_replay_rows(
             model_version=model_version,
             observation_source_version=observation_source_version,
+            replay_source_version=replay_source_version,
         )
         if not probability_rows:
             raise ShortChallengerBacktestError(
@@ -108,6 +113,7 @@ class ShortChallengerBacktestService:
                 "database_sha256": database_sha256,
                 "model_version": model_version,
                 "observation_source_version": observation_source_version,
+                "replay_source_version": replay_source_version,
             },
         )
         database_path = self.repository.database.path
@@ -118,6 +124,7 @@ class ShortChallengerBacktestService:
             database_sha256=database_sha256,
             model_version=model_version,
             observation_source_version=observation_source_version,
+            replay_source_version=replay_source_version,
             probability_contract_count=len(probability_rows),
             replay_row_count=len(replay_rows),
             checkpoint_results=checkpoint_results,

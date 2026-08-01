@@ -1525,6 +1525,7 @@ class Repository:
         *,
         model_version: str,
         observation_source_version: str,
+        replay_source_version: str,
     ) -> list[Row]:
         """Return labeled public-book paper replays without mutating settlement state."""
         with closing(self.database.connect()) as connection:
@@ -1566,6 +1567,7 @@ class Repository:
                       )
                     WHERE observation.model_version = ?
                       AND observation.source_version = ?
+                      AND replay.source_version = ?
                     ORDER BY
                         observation.checkpoint_lead_seconds DESC,
                         replay.latency_ms,
@@ -1573,7 +1575,7 @@ class Repository:
                         observation.asset,
                         observation.market_id
                     """,
-                    (model_version, observation_source_version),
+                    (model_version, observation_source_version, replay_source_version),
                 )
             )
 

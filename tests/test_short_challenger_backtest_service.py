@@ -11,6 +11,7 @@ from crypto_threshold.services.short_challenger_backtest_service import (
     ShortChallengerBacktestService,
     sha256_file,
 )
+from crypto_threshold.services.short_challenger_service import SHORT_LATENCY_SOURCE_VERSION
 from crypto_threshold.storage.db import Database
 from crypto_threshold.storage.repositories import Repository
 
@@ -179,7 +180,7 @@ def _seed_backtest_rows(database: Database) -> None:
                     total_fee, label_id, outcome_yes, payout_usdc, pnl_usdc,
                     reasons, requested_at, sampled_at, settled_at, source_version
                 ) VALUES (?, ?, 0, 0, ?, 'enter', 'settled', '10', '0.5', '20',
-                          '1', ?, ?, ?, ?, '[]', ?, ?, ?, 'test-replay')
+                          '1', ?, ?, ?, ?, '[]', ?, ?, ?, ?)
                 """,
                 (
                     f"replay-{index}",
@@ -192,5 +193,6 @@ def _seed_backtest_rows(database: Database) -> None:
                     received.isoformat(),
                     received.isoformat(),
                     (target + timedelta(minutes=1)).isoformat(),
+                    SHORT_LATENCY_SOURCE_VERSION,
                 ),
             )

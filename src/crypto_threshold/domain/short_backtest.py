@@ -102,6 +102,7 @@ class ShortChallengerBacktestReport:
     database_sha256: str
     model_version: str
     observation_source_version: str
+    replay_source_version: str
     probability_contract_count: int
     replay_row_count: int
     checkpoint_results: tuple[CheckpointBacktestResult, ...]
