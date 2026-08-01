@@ -1,0 +1,24 @@
+[Unit]
+Description=Prune redundant Crypto Threshold runtime snapshots
+ConditionPathIsDirectory=/opt/polymarket-crypto-threshold/backups
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+WorkingDirectory=/opt/polymarket-crypto-threshold
+ExecStart=/usr/bin/python3 /opt/polymarket-crypto-threshold/scripts/prune_research_storage.py --backup-root /opt/polymarket-crypto-threshold/backups --root-retention 0 --updown-retention 1 --forward-retention 1 --microstructure-retention 1 --deploy-retention 1 --artifact-grace-hours 6 --deploy-grace-days 7 --minimum-free-gib 20 --apply
+UMask=0077
+
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateTmp=true
+ProtectControlGroups=true
+ProtectHome=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectSystem=strict
+RestrictAddressFamilies=AF_UNIX
+RestrictRealtime=true
+RestrictSUIDSGID=true
+ReadWritePaths=/opt/polymarket-crypto-threshold/backups

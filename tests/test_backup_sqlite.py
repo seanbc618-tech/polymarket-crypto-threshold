@@ -37,9 +37,7 @@ def test_backup_is_consistent_and_prunes_old_copies(tmp_path: Path) -> None:
 
     restored = sqlite3.connect(f"{backup.as_uri()}?mode=ro", uri=True)
     try:
-        assert restored.execute("SELECT value FROM evidence").fetchone() == (
-            "read-only",
-        )
+        assert restored.execute("SELECT value FROM evidence").fetchone() == ("read-only",)
         assert restored.execute("PRAGMA integrity_check").fetchone() == ("ok",)
         assert restored.execute("PRAGMA journal_mode").fetchone() == ("delete",)
     finally:
@@ -72,3 +70,61 @@ def test_backup_rejects_missing_database_and_invalid_retention(
         pass
     else:
         raise AssertionError("retention=0 should be rejected")
+
+
+def test_backup_skips_unchanged_source_and_still_prunes(tmp_path: Path) -> None:
+    module = _load_backup_module()
+    database = tmp_path / "evidence.db"
+    output_dir = tmp_path / "backups"
+
+    connection = sqlite3.connect(database)
+    connection.execute("PRAGMA journal_mode = WAL")
+    connection.execute("CREATE TABLE evidence (value TEXT NOT NULL)")
+    connection.execute("INSERT INTO evidence VALUES ('stable')")
+    connection.commit()
+    connection.close()
+
+    first = module.backup_database(database, output_dir, retention=1)
+    stale = output_dir / "crypto-threshold-20000101T000000.000000Z.db"
+    stale.write_bytes(b"stale")
+
+    reused = module.backup_database(
+        database,
+        output_dir,
+        retention=1,
+        skip_unchanged=True,
+    )
+
+    assert reused == first
+    assert list(output_dir.glob("crypto-threshold-*.db")) == [first]
+
+
+def test_backup_does_not_skip_nonempty_wal(tmp_path: Path) -> None:
+    module = _load_backup_module()
+    database = tmp_path / "evidence.db"
+    output_dir = tmp_path / "backups"
+
+    connection = sqlite3.connect(database)
+    connection.execute("PRAGMA journal_mode = WAL")
+    connection.execute("CREATE TABLE evidence (value TEXT NOT NULL)")
+    connection.execute("INSERT INTO evidence VALUES ('first')")
+    connection.commit()
+    first = module.backup_database(database, output_dir, retention=1)
+
+    connection.execute("INSERT INTO evidence VALUES ('second')")
+    connection.commit()
+    assert Path(f"{database}-wal").stat().st_size > 0
+    second = module.backup_database(
+        database,
+        output_dir,
+        retention=1,
+        skip_unchanged=True,
+    )
+    connection.close()
+
+    assert second != first
+    restored = sqlite3.connect(f"{second.as_uri()}?mode=ro", uri=True)
+    try:
+        assert restored.execute("SELECT COUNT(*) FROM evidence").fetchone() == (2,)
+    finally:
+        restored.close()
