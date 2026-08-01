@@ -100,6 +100,7 @@ uv run crypto-threshold research-tooling-status
 MICROSTRUCTURE_ENABLED=true uv run crypto-threshold microstructure-shadow --once
 uv run crypto-threshold microstructure-status --db data/microstructure-shadow.db
 uv run crypto-threshold factor-screen <sealed-observations.json>
+uv run crypto-threshold oos-coverage --db <evidence.db> --family daily_threshold
 ```
 
 `analyze` accepts a real Gamma market ID or condition ID. It does not accept an
@@ -159,6 +160,24 @@ uv run crypto-threshold phase2-acceptance \
   --db <evidence.db> \
   --output <report.md>
 ```
+
+Independent settled OOS coverage is a separate fail-closed gate. It counts one
+group per `(contract family, asset, label interval, target time)` and therefore
+does not inflate coverage when a ladder is observed repeatedly. The default
+Daily checkpoint requires 20 groups across seven settlement dates, with at
+least four groups each for BTC, ETH, SOL, and XRP:
+
+```bash
+uv run crypto-threshold oos-coverage \
+  --db <evidence.db> \
+  --family daily_threshold \
+  --workflow-version market-workflow-v2 \
+  --output <oos-coverage.json>
+```
+
+The command opens the evidence database read-only, returns exit code 1 while
+coverage is incomplete, and always reports `promotion_allowed=false`. It is an
+evidence-collection check, not a trading or model-promotion command.
 
 ## Read-only Dashboard
 

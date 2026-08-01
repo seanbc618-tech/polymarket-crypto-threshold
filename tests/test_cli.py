@@ -27,6 +27,7 @@ def test_help_and_analyze_contract() -> None:
     microstructure_shadow = runner.invoke(app, ["microstructure-shadow", "--help"])
     microstructure_status = runner.invoke(app, ["microstructure-status", "--help"])
     factor_screen = runner.invoke(app, ["factor-screen", "--help"])
+    oos_coverage = runner.invoke(app, ["oos-coverage", "--help"])
     assert root.exit_code == 0
     assert analyze.exit_code == 0
     assert dashboard.exit_code == 0
@@ -40,6 +41,7 @@ def test_help_and_analyze_contract() -> None:
     assert microstructure_shadow.exit_code == 0
     assert microstructure_status.exit_code == 0
     assert factor_screen.exit_code == 0
+    assert oos_coverage.exit_code == 0
     assert "--market" in analyze.output
     assert "market-prob" not in analyze.output
     assert "read-only research dashboard" in dashboard.output
@@ -51,6 +53,8 @@ def test_help_and_analyze_contract() -> None:
     assert "--duration-hours" in microstructure_shadow.output
     assert "--db" in microstructure_status.output
     assert "JSON envelope" in factor_screen.output
+    assert "--minimum-groups" in oos_coverage.output
+    assert "independent settled OOS" in oos_coverage.output
     assert "non-executable" in execution_blueprint.output
     assert "R1/R2" in research_tooling.output
 
@@ -76,6 +80,32 @@ def test_research_tooling_cli_reports_core_without_claiming_acceptance() -> None
     assert "SEALED PLAN READY" in result.output
     assert "LIVE NO-GO" in result.output
     assert "submission=false" in result.output
+
+
+def test_oos_coverage_cli_is_read_only_and_fails_closed_on_empty_evidence(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "oos-coverage.db"
+    initialized = runner.invoke(app, ["init-db", "--db-path", str(db_path)])
+    assert initialized.exit_code == 0
+    before = db_path.read_bytes()
+
+    result = runner.invoke(
+        app,
+        [
+            "oos-coverage",
+            "--db",
+            str(db_path),
+            "--family",
+            "daily_threshold",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "OOS coverage" in result.output
+    assert "insufficient_oos_groups:0/20" in result.output
+    assert "promotion_allowed=false" in result.output
+    assert db_path.read_bytes() == before
 
 
 def test_init_db_creates_read_only_schema(tmp_path: Path) -> None:

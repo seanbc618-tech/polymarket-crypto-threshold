@@ -69,6 +69,13 @@ from crypto_threshold.services.microstructure_shadow_service import (
 from crypto_threshold.services.nautilus_execution_blueprint import (
     NautilusExecutionBlueprint,
 )
+from crypto_threshold.services.oos_coverage_service import (
+    DEFAULT_MIN_GROUPS_PER_ASSET,
+    DEFAULT_MIN_OOS_DATES,
+    DEFAULT_MIN_OOS_GROUPS,
+    OOS_COVERAGE_SOURCE_VERSION,
+    OOSCoverageService,
+)
 from crypto_threshold.services.paper_ledger_service import PaperLedgerService
 from crypto_threshold.services.phase2_acceptance_service import Phase2AcceptanceService
 from crypto_threshold.services.pricing_service import cross_check_prices
@@ -1300,6 +1307,118 @@ def short_challenger_backtest(
         console.print("integrity_reasons=" + ",".join(report.integrity.reasons))
     if output is not None:
         console.print(f"report={output}")
+
+
+@app.command("oos-coverage")
+def oos_coverage(
+    db_path: Path = typer.Option(
+        Path("crypto_threshold.db"),
+        "--db",
+        help="Existing evidence database opened in SQLite read-only mode",
+    ),
+    family: str = typer.Option(
+        DAILY_THRESHOLD_FAMILY,
+        "--family",
+        help="Contract family: daily_threshold or short_updown",
+    ),
+    workflow_version: str | None = typer.Option(
+        None,
+        "--workflow-version",
+        help="Exact workflow version; defaults to the canonical family version",
+    ),
+    minimum_groups: int = typer.Option(
+        DEFAULT_MIN_OOS_GROUPS,
+        "--minimum-groups",
+        min=1,
+        help="Minimum independent (asset, interval, target) event groups",
+    ),
+    minimum_dates: int = typer.Option(
+        DEFAULT_MIN_OOS_DATES,
+        "--minimum-dates",
+        min=1,
+        help="Minimum distinct settlement dates",
+    ),
+    minimum_groups_per_asset: int = typer.Option(
+        DEFAULT_MIN_GROUPS_PER_ASSET,
+        "--minimum-groups-per-asset",
+        min=1,
+        help="Minimum independent event groups for each required asset",
+    ),
+    required_assets: str | None = typer.Option(
+        None,
+        "--required-assets",
+        help="Comma-separated assets; defaults to the selected family registry",
+    ),
+    output: Path | None = typer.Option(
+        None,
+        "--output",
+        help="Optional detailed JSON report path",
+    ),
+) -> None:
+    """Fail closed until independent settled OOS event coverage is complete."""
+    try:
+        if family not in {DAILY_THRESHOLD_FAMILY, SHORT_UPDOWN_FAMILY}:
+            raise ValueError(f"unsupported contract family: {family}")
+        assets = (
+            tuple(
+                value.strip().upper()
+                for value in required_assets.split(",")
+                if value.strip()
+            )
+            if required_assets is not None
+            else None
+        )
+        report = OOSCoverageService(
+            Repository(Database(db_path, read_only=True))
+        ).report(
+            contract_family=family,
+            workflow_version=workflow_version,
+            minimum_event_groups=minimum_groups,
+            minimum_settlement_dates=minimum_dates,
+            minimum_groups_per_asset=minimum_groups_per_asset,
+            required_assets=assets,
+        )
+        if output is not None:
+            encoded = json.dumps(
+                _jsonable(
+                    {
+                        "source_version": OOS_COVERAGE_SOURCE_VERSION,
+                        "report": report,
+                    }
+                ),
+                sort_keys=True,
+                indent=2,
+            ) + "\n"
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text(encoded)
+    except Exception as exc:
+        console.print(f"[red]OOS coverage failed:[/] {type(exc).__name__}: {exc}")
+        raise typer.Exit(code=2) from exc
+
+    status = "[green]PASS[/]" if report.coverage_passed else "[yellow]PENDING[/]"
+    per_asset = ", ".join(
+        f"{asset}={count}" for asset, count in report.groups_per_asset
+    ) or "none"
+    console.print(
+        f"OOS coverage {status}: family={report.contract_family} "
+        f"workflow={report.workflow_version} "
+        f"rows={report.labeled_signal_row_count} "
+        f"groups={report.independent_event_group_count}/"
+        f"{report.minimum_event_groups} "
+        f"dates={report.settlement_date_count}/{report.minimum_settlement_dates} "
+        f"assets={','.join(report.assets) or '-'} "
+        "read_only=true"
+    )
+    console.print(f"  groups_per_asset: {per_asset}")
+    if report.reasons:
+        for reason in report.reasons:
+            console.print(f"  [yellow]gate:[/] {reason}")
+    console.print(
+        "[yellow]Coverage is evidence collection only; promotion_allowed=false "
+        "and no trading mutation was executed.[/]"
+    )
+    if not report.coverage_passed:
+        raise typer.Exit(code=1)
 
 
 @app.command("shadow")

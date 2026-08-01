@@ -9,7 +9,7 @@ from crypto_threshold.adapters.polymarket.translator import (
     translate_market,
     translate_order_book,
 )
-from crypto_threshold.domain.markets import calculate_ask_vwap
+from crypto_threshold.domain.markets import OrderBookLevel, calculate_ask_vwap
 from tests.conftest import NOW, make_book, make_market_payload
 
 
@@ -68,3 +68,23 @@ def test_insufficient_depth_is_rejected() -> None:
     execution = calculate_ask_vwap(snapshot.asks, Decimal("1000"))
     assert execution.complete is False
     assert execution.reasons == ("insufficient_ask_depth",)
+
+
+def test_ask_vwap_filters_invalid_depth_and_never_records_negative_slippage() -> None:
+    execution = calculate_ask_vwap(
+        (
+            OrderBookLevel(price=Decimal("0.60"), size=Decimal("10")),
+            OrderBookLevel(price=Decimal("0.40"), size=Decimal("10")),
+            OrderBookLevel(price=Decimal("0.30"), size=Decimal("-100")),
+            OrderBookLevel(price=Decimal("0.20"), size=Decimal("0")),
+        ),
+        Decimal("10"),
+    )
+
+    assert execution.complete is True
+    assert execution.best_ask == Decimal("0.40")
+    assert execution.vwap is not None
+    assert execution.vwap >= execution.best_ask
+    assert execution.slippage_per_share is not None
+    assert execution.slippage_per_share >= 0
+    assert "negative_slippage_invariant" not in execution.reasons

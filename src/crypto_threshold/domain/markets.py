@@ -90,7 +90,16 @@ def calculate_ask_vwap(
             reasons=("target_size_non_positive",),
         )
 
-    levels = tuple(sorted((level for level in asks if level.price > 0), key=lambda x: x.price))
+    levels = tuple(
+        sorted(
+            (
+                level
+                for level in asks
+                if level.price > 0 and level.size > 0
+            ),
+            key=lambda x: x.price,
+        )
+    )
     if not levels:
         return AskExecution(
             target_notional=target_notional,
@@ -120,13 +129,26 @@ def calculate_ask_vwap(
     best_ask = levels[0].price
     complete = remaining == 0
     reasons = () if complete else ("insufficient_ask_depth",)
+    slippage = vwap - best_ask if vwap is not None else None
+    if slippage is not None and slippage < Decimal("-1e-18"):
+        # This should be unreachable after sorting/filtering, but keep the
+        # execution object fail-closed if a materially malformed book violates
+        # the executable-price invariant. Tiny negatives are Decimal rounding
+        # noise from provider prices and are conservatively recorded as zero.
+        complete = False
+        reasons = (*reasons, "negative_slippage_invariant")
+        slippage = None
+    elif slippage is not None:
+        # Decimal arithmetic and provider rounding must never create a
+        # negative execution cost. Preserve the exact positive drag otherwise.
+        slippage = max(Decimal("0"), slippage)
     return AskExecution(
         target_notional=target_notional,
         filled_notional=filled,
         shares=shares,
         vwap=vwap,
         best_ask=best_ask,
-        slippage_per_share=(vwap - best_ask) if vwap is not None else None,
+        slippage_per_share=slippage,
         complete=complete,
         reasons=reasons,
     )

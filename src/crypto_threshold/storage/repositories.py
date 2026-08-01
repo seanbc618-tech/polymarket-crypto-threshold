@@ -1089,6 +1089,89 @@ class Repository:
             ).fetchone()
             return row is not None
 
+    def settled_strategy_signal_rows(
+        self,
+        *,
+        contract_family: str,
+        workflow_version: str,
+    ) -> list[Row]:
+        """Return exact-label analyzed signals for read-only OOS coverage."""
+        with closing(self.database.connect()) as connection:
+            table_names = {
+                str(row["name"])
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                )
+            }
+            required_tables = {"analysis_signals", "settlement_labels"}
+            missing_tables = sorted(required_tables - table_names)
+            if missing_tables:
+                raise RuntimeError(
+                    "OOS coverage requires evidence tables: "
+                    + ", ".join(missing_tables)
+                )
+
+            signal_columns = {
+                str(row["name"])
+                for row in connection.execute("PRAGMA table_info(analysis_signals)")
+            }
+            label_columns = {
+                str(row["name"])
+                for row in connection.execute("PRAGMA table_info(settlement_labels)")
+            }
+            signal_family_filter = (
+                "AND signal.contract_family = ?"
+                if "contract_family" in signal_columns
+                else ""
+            )
+            label_family_filter = (
+                "AND candidate.contract_family = ?"
+                if "contract_family" in label_columns
+                else ""
+            )
+            query = f"""
+                SELECT
+                    signal.signal_id,
+                    signal.market_id,
+                    signal.asset,
+                    signal.deadline,
+                    signal.observed_at,
+                    signal.contract_family,
+                    signal.source_version AS workflow_version,
+                    signal.selected_outcome,
+                    signal.net_ev,
+                    label.label_id,
+                    label.outcome_yes,
+                    label.candle_interval AS label_interval,
+                    label.received_at AS label_received_at
+                FROM analysis_signals AS signal
+                JOIN settlement_labels AS label ON label.label_id = (
+                    SELECT candidate.label_id
+                    FROM settlement_labels AS candidate
+                    WHERE candidate.market_id = signal.market_id
+                      AND candidate.target_time_utc = signal.deadline
+                      {label_family_filter}
+                    ORDER BY candidate.received_at DESC, candidate.label_id DESC
+                    LIMIT 1
+                )
+                WHERE signal.status = 'analyzed'
+                  AND signal.selected_outcome IN ('YES', 'NO')
+                  AND signal.net_ev IS NOT NULL
+                  {signal_family_filter}
+                  AND signal.source_version = ?
+                ORDER BY signal.observed_at, signal.signal_id
+            """
+            parameters: tuple[str, ...]
+            if "contract_family" in label_columns and "contract_family" in signal_columns:
+                parameters = (contract_family, contract_family, workflow_version)
+            elif "contract_family" in label_columns:
+                parameters = (contract_family, workflow_version)
+            elif "contract_family" in signal_columns:
+                parameters = (contract_family, workflow_version)
+            else:
+                parameters = (workflow_version,)
+            return list(connection.execute(query, parameters))
+
     def open_paper_rows(self, limit: int = 1000) -> list[Row]:
         with closing(self.database.connect()) as connection:
             return list(
