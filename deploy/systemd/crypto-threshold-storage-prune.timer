@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily Crypto Threshold redundant snapshot pruning
+
+[Timer]
+OnCalendar=*-*-* 04:50:00
+Persistent=true
+Unit=crypto-threshold-storage-prune.service
+
+[Install]
+WantedBy=timers.target
