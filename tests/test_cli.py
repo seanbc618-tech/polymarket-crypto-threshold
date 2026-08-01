@@ -21,6 +21,7 @@ def test_help_and_analyze_contract() -> None:
     replay_build = runner.invoke(app, ["replay-build", "--help"])
     replay_plan = runner.invoke(app, ["replay-plan", "--help"])
     challenger_status = runner.invoke(app, ["short-challenger-status", "--help"])
+    challenger_backtest = runner.invoke(app, ["short-challenger-backtest", "--help"])
     execution_blueprint = runner.invoke(app, ["execution-blueprint", "--help"])
     research_tooling = runner.invoke(app, ["research-tooling-status", "--help"])
     microstructure_shadow = runner.invoke(app, ["microstructure-shadow", "--help"])
@@ -33,6 +34,7 @@ def test_help_and_analyze_contract() -> None:
     assert replay_build.exit_code == 0
     assert replay_plan.exit_code == 0
     assert challenger_status.exit_code == 0
+    assert challenger_backtest.exit_code == 0
     assert execution_blueprint.exit_code == 0
     assert research_tooling.exit_code == 0
     assert microstructure_shadow.exit_code == 0
@@ -45,6 +47,7 @@ def test_help_and_analyze_contract() -> None:
     assert "--training-dataset" in replay_build.output
     assert "--training-label-count" in replay_plan.output
     assert "--db" in challenger_status.output
+    assert "--model-version" in challenger_backtest.output
     assert "--duration-hours" in microstructure_shadow.output
     assert "--db" in microstructure_status.output
     assert "JSON envelope" in factor_screen.output

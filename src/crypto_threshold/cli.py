@@ -78,6 +78,10 @@ from crypto_threshold.services.research_integrity_service import (
 )
 from crypto_threshold.services.settlement_service import SettlementService
 from crypto_threshold.services.shadow_monitor_service import ShadowMonitorService
+from crypto_threshold.services.short_challenger_backtest_service import (
+    ShortChallengerBacktestService,
+    sha256_file,
+)
 from crypto_threshold.services.short_challenger_service import ShortChallengerService
 from crypto_threshold.services.stream_research_service import StreamResearchCoordinator
 from crypto_threshold.storage.db import SCHEMA_VERSION, Database
@@ -1184,6 +1188,118 @@ def short_challenger_status(
             f"{float(row['settled_pnl_usdc']):.6f}",
         )
     console.print(latency_table)
+
+
+@app.command("short-challenger-backtest")
+def short_challenger_backtest(
+    db_path: Path = typer.Option(
+        ...,
+        "--db",
+        help="Frozen Up/Down SQLite snapshot opened in strict read-only mode",
+    ),
+    model_version: str = typer.Option(
+        ...,
+        "--model-version",
+        help="Exact frozen CEX direction model version",
+    ),
+    observation_source_version: str = typer.Option(
+        "short-challenger-r0-v1",
+        "--observation-source-version",
+        help="Exact prospective R0 collection version",
+    ),
+    output: Path | None = typer.Option(
+        None,
+        "--output",
+        help="Optional sealed JSON report path",
+    ),
+) -> None:
+    """Backtest frozen R0 predictions and public-book latency fills without refitting."""
+    try:
+        resolved_db = db_path.expanduser().resolve()
+        if output is not None and output.expanduser().resolve() == resolved_db:
+            raise ValueError("output path must not overwrite the frozen database")
+        database = Database(resolved_db, read_only=True)
+        database_sha256 = sha256_file(database.path)
+        report = ShortChallengerBacktestService(Repository(database)).run(
+            model_version=model_version,
+            database_sha256=database_sha256,
+            observation_source_version=observation_source_version,
+        )
+        encoded = json.dumps(_jsonable(report), sort_keys=True, indent=2) + "\n"
+        if output is not None:
+            output = output.expanduser().resolve()
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text(encoded)
+    except Exception as exc:
+        console.print(f"[red]Short challenger backtest failed:[/] {type(exc).__name__}: {exc}")
+        raise typer.Exit(code=2) from exc
+
+    console.print(
+        "R0 backtest complete: "
+        f"model={report.model_version} "
+        f"contracts={report.probability_contract_count} "
+        f"groups={report.coverage.event_group_count} "
+        f"dates={report.coverage.date_count} "
+        f"coverage_pass={report.coverage.passed} "
+        f"integrity_pass={report.integrity.passed} "
+        "refit=false promotion_allowed=false live_trading_allowed=false"
+    )
+    probability_table = Table(
+        "Checkpoint",
+        "Paired contracts",
+        "Groups",
+        "Model Brier",
+        "Market Brier",
+        "Model log loss",
+        "Market log loss",
+    )
+    for checkpoint_result in report.checkpoint_results:
+        model_metrics = checkpoint_result.model_metrics
+        market_metrics = checkpoint_result.market_baseline_metrics
+        probability_table.add_row(
+            f"T-{checkpoint_result.checkpoint_lead_seconds}s",
+            str(checkpoint_result.paired_contract_count),
+            str(checkpoint_result.paired_event_group_count),
+            f"{model_metrics.brier:.6f}" if model_metrics is not None else "n/a",
+            f"{market_metrics.brier:.6f}" if market_metrics is not None else "n/a",
+            f"{model_metrics.log_loss:.6f}" if model_metrics is not None else "n/a",
+            f"{market_metrics.log_loss:.6f}" if market_metrics is not None else "n/a",
+        )
+    console.print(probability_table)
+    execution_table = Table(
+        "Checkpoint",
+        "Latency",
+        "Settled",
+        "Wins",
+        "PnL",
+        "ROI",
+        "Attempted net EV",
+    )
+    for execution_result in report.execution_results:
+        execution_table.add_row(
+            f"T-{execution_result.checkpoint_lead_seconds}s",
+            f"{execution_result.latency_ms}ms",
+            str(execution_result.settled_entry_count),
+            str(execution_result.wins),
+            f"{execution_result.total_pnl_usdc:.6f}",
+            (
+                f"{execution_result.roi_on_filled_stake:.6%}"
+                if execution_result.roi_on_filled_stake is not None
+                else "n/a"
+            ),
+            (
+                f"{execution_result.net_ev_per_attempted_usdc:.6%}"
+                if execution_result.net_ev_per_attempted_usdc is not None
+                else "n/a"
+            ),
+        )
+    console.print(execution_table)
+    if report.coverage.reasons:
+        console.print("coverage_reasons=" + ",".join(report.coverage.reasons))
+    if report.integrity.reasons:
+        console.print("integrity_reasons=" + ",".join(report.integrity.reasons))
+    if output is not None:
+        console.print(f"report={output}")
 
 
 @app.command("shadow")

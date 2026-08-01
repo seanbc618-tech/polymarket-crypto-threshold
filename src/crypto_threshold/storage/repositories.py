@@ -1469,6 +1469,114 @@ class Repository:
                 )
             )
 
+    def short_challenger_backtest_probability_rows(
+        self,
+        *,
+        model_version: str,
+        observation_source_version: str,
+    ) -> list[Row]:
+        """Return labeled R0 probability rows from an explicitly frozen model."""
+        with closing(self.database.connect()) as connection:
+            return list(
+                connection.execute(
+                    """
+                    SELECT
+                        observation.observation_id,
+                        observation.market_id,
+                        observation.asset,
+                        observation.target_time_utc,
+                        observation.checkpoint_lead_seconds,
+                        observation.checkpoint_at,
+                        observation.model_probability,
+                        observation.market_yes_midpoint,
+                        observation.status AS observation_status,
+                        observation.observed_at,
+                        observation.received_at,
+                        label.label_id,
+                        label.outcome_yes,
+                        label.candle_interval,
+                        label.received_at AS label_received_at,
+                        label.source_version AS label_source_version
+                    FROM short_challenger_observations AS observation
+                    JOIN settlement_labels AS label
+                      ON label.label_id = (
+                          SELECT candidate.label_id
+                          FROM settlement_labels AS candidate
+                          WHERE candidate.market_id = observation.market_id
+                            AND candidate.target_time_utc = observation.target_time_utc
+                            AND candidate.contract_family = 'short_updown'
+                          ORDER BY candidate.received_at DESC, candidate.label_id DESC
+                          LIMIT 1
+                      )
+                    WHERE observation.model_version = ?
+                      AND observation.source_version = ?
+                    ORDER BY
+                        observation.checkpoint_lead_seconds DESC,
+                        observation.target_time_utc,
+                        observation.asset,
+                        observation.market_id
+                    """,
+                    (model_version, observation_source_version),
+                )
+            )
+
+    def short_challenger_backtest_replay_rows(
+        self,
+        *,
+        model_version: str,
+        observation_source_version: str,
+    ) -> list[Row]:
+        """Return labeled public-book paper replays without mutating settlement state."""
+        with closing(self.database.connect()) as connection:
+            return list(
+                connection.execute(
+                    """
+                    SELECT
+                        replay.replay_id,
+                        replay.observation_id,
+                        observation.market_id,
+                        observation.asset,
+                        observation.target_time_utc,
+                        observation.checkpoint_lead_seconds,
+                        replay.latency_ms,
+                        replay.outcome,
+                        replay.action,
+                        replay.status,
+                        replay.size_usdc,
+                        replay.entry_vwap,
+                        replay.shares,
+                        replay.total_fee,
+                        replay.pnl_usdc,
+                        replay.source_version AS replay_source_version,
+                        label.label_id AS latest_label_id,
+                        label.outcome_yes AS latest_outcome_yes,
+                        label.received_at AS label_received_at
+                    FROM short_latency_replays AS replay
+                    JOIN short_challenger_observations AS observation
+                      ON observation.observation_id = replay.observation_id
+                    JOIN settlement_labels AS label
+                      ON label.label_id = (
+                          SELECT candidate.label_id
+                          FROM settlement_labels AS candidate
+                          WHERE candidate.market_id = observation.market_id
+                            AND candidate.target_time_utc = observation.target_time_utc
+                            AND candidate.contract_family = 'short_updown'
+                          ORDER BY candidate.received_at DESC, candidate.label_id DESC
+                          LIMIT 1
+                      )
+                    WHERE observation.model_version = ?
+                      AND observation.source_version = ?
+                    ORDER BY
+                        observation.checkpoint_lead_seconds DESC,
+                        replay.latency_ms,
+                        observation.target_time_utc,
+                        observation.asset,
+                        observation.market_id
+                    """,
+                    (model_version, observation_source_version),
+                )
+            )
+
     def save_shadow_cycle(self, cycle: ShadowCycleResult) -> None:
         with self.database.transaction() as connection:
             connection.execute(
