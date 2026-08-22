@@ -1,0 +1,24 @@
+[Unit]
+Description=Strategy-neutral public market capture
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/etc/crypto-infra-capture.env
+
+[Service]
+Type=simple
+User=crypto-infra
+Group=crypto-infra
+EnvironmentFile=/etc/crypto-infra-capture.env
+WorkingDirectory=/opt/polymarket-crypto-infrastructure
+ExecStart=/opt/polymarket-crypto-infrastructure/.venv/bin/crypto-infra capture --catalog ${CAPTURE_CATALOG} --output ${CAPTURE_OUTPUT} --source ${CAPTURE_SOURCE} --source-config ${CAPTURE_SOURCE_CONFIG}
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/crypto-infra
+
+[Install]
+WantedBy=multi-user.target
+
